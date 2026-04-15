@@ -10,8 +10,8 @@
 set -e
 
 # --- Настройки (можно вынести, но для простоты оставим здесь) ---
-REPO_OWNER="DonMatteoVPN"
-REPO_NAME="LumaxADM"
+REPO_OWNER="LumaxDev"
+REPO_NAME="lumaxadm"
 REPO_BRANCH="main" # <-- ВАЖНО: Укажи правильную ветку!
 
 # --- Цвета ---
