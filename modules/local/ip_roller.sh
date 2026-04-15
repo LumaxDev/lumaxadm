@@ -5,7 +5,7 @@
 #
 #  ( РОДИТЕЛЬ | КЛАВИША | НАЗВАНИЕ | ФУНКЦИЯ | ПОРЯДОК | ГРУППА | ОПИСАНИЕ )
 # @menu.manifest
-# @item( main | 4 | 🎣 Ловля IP | show_ip_roller_menu | 18 | 2 | Прокрутка IP до попадания в whitelist операторов. )
+# @item( main | 4 | 🎣 Ловля IP ${C_YELLOW}(Yandex Cloud)${C_RESET} | show_ip_roller_menu | 18 | 2 | Прокрутка IP до попадания в whitelist операторов. )
 #
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1
 
