@@ -143,24 +143,42 @@ _remna_setup_node_logs() {
     info "Настраиваю docker-compose.yml..."
     run_cmd cp "$compose_file" "${compose_file}.bak_lumaxadm_$(date +%s)"
 
-    if grep -q "/var/log/remnanode:/var/log/remnanode" "$compose_file"; then
+    # Проверяем не раскомментирован ли уже volume логов
+    if grep -qE "^[[:space:]]*-.*(/var/log/remnanode:/var/log/remnanode)" "$compose_file"; then
         ok "Volume для логов уже прописан в docker-compose.yml."
     else
-        # Проверяем есть ли секция volumes
-        if grep -q "^[[:space:]]*volumes:" "$compose_file"; then
-            # volumes есть — добавляем строку после неё
-            run_cmd sed -i '/^[[:space:]]*volumes:/a \      - "/var/log/remnanode:/var/log/remnanode"' "$compose_file"
+        # Случай 1: есть закомментированный volumes и наш volume внутри
+        if grep -qE "^[[:space:]]*#[[:space:]]*volumes:" "$compose_file" && \
+           grep -qE "^[[:space:]]*#.*-.*(/var/log/remnanode)" "$compose_file"; then
+            # Раскомментируем секцию volumes
+            run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(volumes:\)|\    \1|' "$compose_file"
+            # Раскомментируем строку с логами
+            run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(-[[:space:]]*/var/log/remnanode:/var/log/remnanode\)|      \1|' "$compose_file"
+            ok "Volume для логов раскомментирован в docker-compose.yml."
+
+        # Случай 2: есть закомментированный volumes, но нашего volume нет
+        elif grep -qE "^[[:space:]]*#[[:space:]]*volumes:" "$compose_file"; then
+            # Раскомментируем секцию volumes
+            run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(volumes:\)|\    \1|' "$compose_file"
+            # Добавляем наш volume после volumes:
+            run_cmd sed -i '/^[[:space:]]*volumes:/a \      - /var/log/remnanode:/var/log/remnanode' "$compose_file"
+            ok "Volume для логов добавлен в docker-compose.yml."
+
+        # Случай 3: есть раскомментированный volumes
+        elif grep -qE "^[[:space:]]*volumes:" "$compose_file"; then
+            run_cmd sed -i '/^[[:space:]]*volumes:/a \      - /var/log/remnanode:/var/log/remnanode' "$compose_file"
+            ok "Volume для логов добавлен в docker-compose.yml."
+
+        # Случай 4: volumes вообще нет
         else
-            # volumes нет — добавляем перед env_file или в конец сервиса
-            if grep -q "env_file:" "$compose_file"; then
-                run_cmd sed -i '/env_file:/i \    volumes:\n      - "/var/log/remnanode:/var/log/remnanode"' "$compose_file"
+            if grep -q "restart:" "$compose_file"; then
+                run_cmd sed -i '/restart:/a \    volumes:\n      - /var/log/remnanode:/var/log/remnanode' "$compose_file"
             else
-                # Крайний случай — добавляем перед последней строкой
                 echo '    volumes:' | run_cmd tee -a "$compose_file" >/dev/null
-                echo '      - "/var/log/remnanode:/var/log/remnanode"' | run_cmd tee -a "$compose_file" >/dev/null
+                echo '      - /var/log/remnanode:/var/log/remnanode' | run_cmd tee -a "$compose_file" >/dev/null
             fi
+            ok "Volume для логов добавлен в docker-compose.yml."
         fi
-        ok "Volume добавлен в docker-compose.yml."
     fi
 
     # Шаг 3: Устанавливаем logrotate
@@ -199,17 +217,11 @@ LOGROTATE_EOF
         warn "Logrotate выдал предупреждение, но это нормально если логов ещё нет."
     fi
 
-    # Шаг 6: Перезапускаем ноду
+    # Шаг 6: Перезапускаем ноду через docker compose (не через remnanode — он интерактивный)
     echo ""
     info "Перезапускаю ноду чтобы подхватила новые настройки..."
-    if command -v remnanode &>/dev/null; then
-        remnanode restart >/dev/null 2>&1
-        ok "Нода перезапущена."
-    else
-        # Fallback через docker compose
-        (cd /opt/remnanode && docker compose down && docker compose up -d) >/dev/null 2>&1
-        ok "Нода перезапущена через docker compose."
-    fi
+    (cd /opt/remnanode && docker compose down && docker compose up -d) >/dev/null 2>&1
+    ok "Нода перезапущена."
 
     echo ""
     ok "Готово! Логи настроены. Теперь access.log и error.log пишутся в /var/log/remnanode/"
