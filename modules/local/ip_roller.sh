@@ -270,7 +270,7 @@ for i, vm in enumerate(data, 1):
 
     # Спрашиваем префикс
     local prefix
-    prefix=$(safe_read "Фильтр по префиксу IP (рекомендуем 51.250, Enter — без фильтра)" "51.250") || return
+    prefix=$(safe_read "Префикс IP (например 51.250, 84.201 или пусто для любого)" "") || return
 
     # Количество попыток
     local attempts
