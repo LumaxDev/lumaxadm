@@ -26,10 +26,25 @@ _perform_install_or_update() {
 
     local INSTALL_DIR="/opt/lumaxadm"
     printf_info "Разворачиваю файлы в ${INSTALL_DIR}..."
+
+    # Сохраняем пользовательский конфиг перед обновлением
+    local SAVED_CONF=""
+    if [[ "$mode" == "update" && -f "${INSTALL_DIR}/config/lumaxadm.conf" ]]; then
+        SAVED_CONF=$(mktemp /tmp/lumaxadm_conf_backup.XXXXXX)
+        cp "${INSTALL_DIR}/config/lumaxadm.conf" "$SAVED_CONF"
+    fi
+
     run_cmd rm -rf "$INSTALL_DIR"
     run_cmd mkdir -p "$INSTALL_DIR"
     run_cmd cp -r "${TEMP_DIR}/." "$INSTALL_DIR/"
     run_cmd chmod +x "${INSTALL_DIR}/lumaxadm.sh"
+
+    # Восстанавливаем пользовательский конфиг после обновления
+    if [[ -n "$SAVED_CONF" && -f "$SAVED_CONF" ]]; then
+        cp "$SAVED_CONF" "${INSTALL_DIR}/config/lumaxadm.conf"
+        rm -f "$SAVED_CONF"
+        ok "Пользовательские настройки сохранены."
+    fi
 
     run_cmd ln -sf "${INSTALL_DIR}/lumaxadm.sh" "$INSTALL_PATH"
     
