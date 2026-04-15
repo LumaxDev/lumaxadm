@@ -312,8 +312,8 @@ _firewall_reconfigure_wizard() {
             extra_ports=$(safe_read "Введите порты через пробел (напр. 8443 9443)" "")
             for port in $extra_ports; do
                 if validate_port "$port"; then
-                    run_cmd ufw allow "$port" comment 'Custom VPN'
-                    ok "Открыт дополнительный порт $port"
+                    run_cmd ufw allow "$port"/tcp comment 'Custom VPN'
+                    ok "Открыт дополнительный порт $port/tcp"
                 else
                     warn "Пропущен некорректный порт: $port"
                 fi
@@ -363,13 +363,13 @@ _firewall_add_rule() {
             fi
 
             if [[ -n "$ip" ]]; then
-                if ask_yes_no "Открыть порт ${port} только для IP ${ip}?"; then
-                    run_cmd ufw allow from "$ip" to any port "$port" comment "Manual Rule"
+                if ask_yes_no "Открыть порт ${port}/tcp только для IP ${ip}?"; then
+                    run_cmd ufw allow from "$ip" to any port "$port" proto tcp comment "Manual Rule"
                     ok "Правило добавлено."
                 fi
             else
-                if ask_yes_no "Открыть порт ${port} для всех?"; then
-                    run_cmd ufw allow "$port" comment "Manual Rule"
+                if ask_yes_no "Открыть порт ${port}/tcp для всех?"; then
+                    run_cmd ufw allow "$port"/tcp comment "Manual Rule"
                     ok "Правило добавлено."
                 fi
             fi
