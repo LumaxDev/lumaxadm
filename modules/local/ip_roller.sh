@@ -5,11 +5,11 @@
 #
 #  ( РОДИТЕЛЬ | КЛАВИША | НАЗВАНИЕ | ФУНКЦИЯ | ПОРЯДОК | ГРУППА | ОПИСАНИЕ )
 # @menu.manifest
-# @item( main | 3 | 🎣 Ловля IP | show_ip_roller_menu | 25 | 2 | Прокрутка IP до попадания в whitelist операторов. )
+# @item( main | 4 | 🎣 Ловля IP | show_ip_roller_menu | 18 | 2 | Прокрутка IP до попадания в whitelist операторов. )
 #
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1
 
-readonly _IPR_SCRIPT_URL="https://raw.githubusercontent.com/princeofscale/yacloud-ip-roller/main/roll_ip.py"
+readonly _IPR_SCRIPT_URL="https://raw.githubusercontent.com/princeofscale/yacloud-ip-roller/main/yacloud-ip-roller/roll_ip.py"
 readonly _IPR_INSTALL_DIR="/opt/lumaxadm/tools/ip-roller"
 readonly _IPR_SCRIPT_PATH="${_IPR_INSTALL_DIR}/roll_ip.py"
 
