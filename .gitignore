@@ -1,0 +1,20 @@
+# Claude Code
+CLAUDE.md
+docs/superpowers/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temp
+/tmp/
