@@ -14,7 +14,8 @@
 # @item( local_care | 2 | 🚀 Настройка сети «Форсаж» | _apply_bbr | 20 | 1 | Применяет BBR + CAKE для максимальной производительности. )
 # @item( local_care | 3 | 🌐 Управление IPv6 | _toggle_ipv6 | 30 | 1 | Полное включение или отключение поддержки IPv6. )
 # @item( local_care | 4 | 💨 Тест скорости | _run_speedtest | 40 | 2 | Замеряет скорость до лучшего сервера (Ookla). )
-# @item( local_care | 5 | ⚙️  Профиль нагрузки дашборда | _set_dashboard_profile_menu | 50 | 2 | Настройка частоты обновления данных на главной панели. )
+# @item( local_care | 5 | 🧪 Multitest — все тесты сервера | _run_multitest | 50 | 2 | Комплексный тест: CPU, RAM, диск, сеть, геолокация. )
+# @item( local_care | 6 | ⚙️  Профиль нагрузки дашборда | _set_dashboard_profile_menu | 60 | 2 | Настройка частоты обновления данных на главной панели. )
 #
 
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 # Защита от прямого запуска
@@ -216,6 +217,27 @@ _calculate_vpn_capacity() {
     fi
 }
 _ensure_speedtest_ok() { if command -v speedtest &>/dev/null && [[ "$(speedtest --version 2>/dev/null)" == *"Ookla"* ]]; then return 0; fi; info "Готовлю систему к установке Speedtest..."; ensure_package "curl" "gnupg" "apt-transport-https" "ca-certificates"; info "Пробую установить Speedtest (метод 1: репозиторий)..."; curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | run_cmd bash >/dev/null 2>&1; run_cmd apt-get update -qq >/dev/null 2>&1; if run_cmd apt-get install -y speedtest >/dev/null 2>&1; then ok "Установка через репозиторий прошла успешно."; return 0; fi; warn "Метод 1 не сработал. Пробую метод 2: прямая загрузка..."; local arch; arch=$(uname -m); local url=""; case "$arch" in x86_64) url="https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz" ;; aarch64) url="https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-aarch64.tgz" ;; *) err "Неизвестная архитектура: $arch."; return 1;; esac; info "Качаю архив для $arch..."; if ! run_cmd curl -sL "$url" -o /tmp/speedtest.tgz; then err "Не удалось скачать архив."; return 1; fi; info "Распаковываю и устанавливаю..."; run_cmd tar -xzf /tmp/speedtest.tgz -C /tmp; run_cmd mv /tmp/speedtest /usr/local/bin/; run_cmd chmod +x /usr/local/bin/speedtest; run_cmd rm -f /tmp/speedtest.tgz /tmp/speedtest.md /tmp/speedtest.5; if command -v speedtest &>/dev/null; then ok "Установка через бинарник прошла успешно."; return 0; else err "Запасной метод тоже не сработал."; return 1; fi; }
+_run_multitest() {
+    clear
+    menu_header "🧪 Multitest — комплексный тест сервера"
+
+    if ! command -v multitest &>/dev/null; then
+        info "Multitest не установлен. Устанавливаю..."
+        if curl -sL https://raw.githubusercontent.com/saveksme/multitest/master/multitest.sh -o /usr/local/bin/multitest && chmod +x /usr/local/bin/multitest; then
+            ok "Multitest установлен."
+        else
+            err "Не удалось установить Multitest."
+            wait_for_enter
+            return 1
+        fi
+    fi
+
+    info "Запускаю Multitest..."
+    echo ""
+    multitest
+    wait_for_enter
+}
+
 _run_speedtest() {
     clear
     menu_header "🚀 Тест скорости канала"
