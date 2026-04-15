@@ -339,7 +339,6 @@ show_xray_scanner_menu() {
         echo ""
         printf_menu_option "1" "📊 Полный отчёт (топ IP, аномалии)"
         printf_menu_option "2" "📡 Live-мониторинг (обновление каждые 5 сек)"
-        printf_menu_option "3" "🚫 Заблочить подозрительные IP"
         printf_menu_option "p" "🔧 Указать порт вручную"
         echo ""
         printf_menu_option "b" "Назад"
@@ -365,14 +364,6 @@ show_xray_scanner_menu() {
                 else
                     _xrs_live_monitor "$xray_port"
                 fi
-                ;;
-            3)
-                if [[ -z "$xray_port" ]]; then
-                    warn "Порт не определён. Укажи через [p]."
-                else
-                    _xrs_block_ip "$xray_port"
-                fi
-                wait_for_enter
                 ;;
             p|P)
                 local new_port
