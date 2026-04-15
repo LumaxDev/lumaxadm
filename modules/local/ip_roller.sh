@@ -83,6 +83,47 @@ _ipr_ensure_installed() {
     return 0
 }
 
+# --- Резервирование IP ---
+
+_ipr_reserve_ip() {
+    local target_ip="$1"
+    local yc_bin="${HOME}/yandex-cloud/bin/yc"
+    command -v yc &>/dev/null && yc_bin="yc"
+
+    info "Ищу адрес ${target_ip} в Яндекс Облаке..."
+
+    # Получаем список адресов и ищем нужный
+    local address_id
+    address_id=$("$yc_bin" vpc address list --format json 2>/dev/null \
+        | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for addr in data:
+    ip = addr.get('external_ipv4_address', {}).get('address', '')
+    if ip == '${target_ip}':
+        print(addr['id'])
+        break
+" 2>/dev/null)
+
+    if [[ -z "$address_id" ]]; then
+        warn "Не нашёл этот IP в списке адресов. Возможно он ещё не зарегистрирован как объект vpc."
+        info "Попробуй вручную:"
+        printf_description "yc vpc address list"
+        printf_description "yc vpc address update --reserved=true <address_id>"
+        return 1
+    fi
+
+    info "Нашёл: address_id=${address_id}. Резервирую..."
+
+    if "$yc_bin" vpc address update --reserved=true "$address_id" >/dev/null 2>&1; then
+        ok "IP ${target_ip} зафиксирован! Теперь он статический — никуда не денется."
+    else
+        err "Не удалось зарезервировать. Попробуй вручную:"
+        printf_description "yc vpc address update --reserved=true ${address_id}"
+        return 1
+    fi
+}
+
 # --- Интерактивный запуск ---
 
 _ipr_run_yandex() {
@@ -134,10 +175,35 @@ _ipr_run_yandex() {
     echo ""
     if [[ $exit_code -eq 0 ]]; then
         ok "Красавчик! IP пойман."
+
+        # Определяем какой IP сейчас на виртуалке
+        local caught_ip
+        caught_ip=$(curl -s --connect-timeout 3 --max-time 5 -H "Metadata-Flavor: Google" \
+            "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" 2>/dev/null)
+
+        if [[ -z "$caught_ip" ]]; then
+            # fallback через yc
+            local yc_bin="${HOME}/yandex-cloud/bin/yc"
+            command -v yc &>/dev/null && yc_bin="yc"
+            caught_ip=$("$yc_bin" compute instance get --id "$instance_id" --format json 2>/dev/null \
+                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['network_interfaces'][0]['primary_v4_address']['one_to_one_nat']['address'])" 2>/dev/null)
+        fi
+
         echo ""
-        info "Хочешь зафиксировать этот IP? Выполни на своей машине:"
-        printf_description "yc vpc address list"
-        printf_description "yc vpc address update --reserved=true <address_id>"
+        if [[ -n "$caught_ip" ]]; then
+            info "Пойманный IP: ${C_GREEN}${caught_ip}${C_RESET}"
+            echo ""
+            if ask_yes_no "Зафиксировать этот IP навсегда (сделать статическим)?" "y"; then
+                _ipr_reserve_ip "$caught_ip"
+            else
+                info "Ок, IP остаётся эфемерным. При ребуте может смениться."
+            fi
+        else
+            warn "Не смог определить текущий IP для резервирования."
+            info "Можешь зафиксировать вручную:"
+            printf_description "yc vpc address list"
+            printf_description "yc vpc address update --reserved=true <address_id>"
+        fi
     else
         warn "Не повезло, IP не нашёлся. Попробуй ещё раз или увеличь попытки."
     fi
