@@ -26,6 +26,10 @@ _remna_node_script_installed() {
     command -v remnanode &>/dev/null
 }
 
+_remna_selfsteal_installed() {
+    command -v selfsteal &>/dev/null
+}
+
 # --- Действия ---
 
 _remna_install_panel_script() {
@@ -228,6 +232,29 @@ LOGROTATE_EOF
     info "Посмотреть: ${C_CYAN}tail -f /var/log/remnanode/access.log${C_RESET}"
 }
 
+_remna_install_selfsteal() {
+    clear
+    menu_header "🌐 Установка Caddy Selfsteal"
+    info "Запускаю установщик от Dignezzz..."
+    echo ""
+    bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install
+    echo ""
+    if command -v selfsteal &>/dev/null; then
+        ok "Caddy Selfsteal установлен!"
+        info "Управлять можно командой: ${C_CYAN}selfsteal${C_RESET}"
+    else
+        err "Что-то пошло не так при установке."
+    fi
+}
+
+_remna_run_selfsteal() {
+    clear
+    menu_header "🌐 Caddy Selfsteal"
+    info "Запускаю Selfsteal..."
+    echo ""
+    selfsteal
+}
+
 # --- Меню ---
 
 show_remnawave_centre_menu() {
@@ -290,6 +317,15 @@ show_remnawave_centre_menu() {
             printf_menu_option "3" "📝 Сменить путь логов ${C_GRAY}(Опционально)${C_RESET}"
         fi
 
+        # Пункт 4: Selfsteal (только если нода есть)
+        if [[ $has_node -eq 1 ]]; then
+            if _remna_selfsteal_installed; then
+                printf_menu_option "4" "🌐 Запустить Caddy Selfsteal ${C_GREEN}(Dignezzz)${C_RESET}"
+            else
+                printf_menu_option "4" "🌐 Установить Caddy Selfsteal ${C_YELLOW}(Dignezzz)${C_RESET}"
+            fi
+        fi
+
         echo ""
         printf_menu_option "b" "Назад"
         echo ""
@@ -336,6 +372,16 @@ show_remnawave_centre_menu() {
                     _remna_setup_node_logs
                 else
                     warn "Нода не установлена — логи некуда менять."
+                fi
+                wait_for_enter
+                ;;
+            4)
+                if [[ $has_node -eq 0 ]]; then
+                    warn "Нода не установлена — Selfsteal ставить некуда."
+                elif _remna_selfsteal_installed; then
+                    _remna_run_selfsteal
+                else
+                    _remna_install_selfsteal
                 fi
                 wait_for_enter
                 ;;
