@@ -233,14 +233,16 @@ _ipr_run_yandex() {
 
     if [[ -n "$vm_list" ]] && echo "$vm_list" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d else 1)" 2>/dev/null; then
         echo ""
-        printf "  ${C_GRAY}%-25s %-20s %-16s %s${C_RESET}\n" "ИМЯ" "ID" "IP" "СТАТУС"
-        print_separator "─" 64
 
         echo "$vm_list" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-for vm in data:
+if not data:
+    sys.exit(0)
+for i, vm in enumerate(data, 1):
     name = vm.get('name', '???')
+    if len(name) > 20:
+        name = name[:18] + '..'
     vid = vm.get('id', '???')
     status = vm.get('status', '???')
     ip = '—'
@@ -249,10 +251,12 @@ for vm in data:
         if 'address' in nat:
             ip = nat['address']
             break
-    print(f'  {name:<25} {vid:<20} {ip:<16} {status}')
+    print(f'  [{i}] {name}')
+    print(f'      ID: {vid}')
+    print(f'      IP: {ip}  |  {status}')
+    print()
 " 2>/dev/null
 
-        echo ""
     fi
 
     # Спрашиваем ID
