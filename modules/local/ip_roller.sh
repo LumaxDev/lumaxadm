@@ -213,24 +213,56 @@ _ipr_run_yandex() {
     clear
     menu_header "🎣 Ловля IP — Яндекс Облако"
 
-    if ! _ipr_detect_yandex; then
-        err "Братан, это не Яндекс сервер. Тут ловить нечего."
-        return
-    fi
-
     _ipr_ensure_installed || return
 
-    # Получаем instance-id автоматически
-    local instance_id
-    instance_id=$(_ipr_get_instance_id)
+    # Предупреждение
+    print_separator "─" 64
+    printf "  ${C_YELLOW}⚠️  ВАЖНО:${C_RESET} Крути IP только с ${C_BOLD}другого сервера${C_RESET}!\n"
+    printf "  Если крутить IP этого же сервера — потеряешь SSH.\n"
+    printf "  Ловля работает через API Яндекса, не через SSH.\n"
+    print_separator "─" 64
+    echo ""
 
-    if [[ -z "$instance_id" ]]; then
-        info "Не смог автоматом определить ID виртуалки."
-        instance_id=$(ask_non_empty "Введи instance-id руками") || return
-    else
-        ok "Нашёл твою виртуалку: ${instance_id}"
+    # Показываем список VM если yc настроен
+    local yc_bin="${HOME}/yandex-cloud/bin/yc"
+    command -v yc &>/dev/null && yc_bin="yc"
+
+    info "Ищу виртуалки в твоём облаке..."
+    local vm_list
+    vm_list=$("$yc_bin" compute instance list --format json 2>/dev/null)
+
+    if [[ -n "$vm_list" ]] && echo "$vm_list" | python3 -c "import sys,json; d=json.load(sys.stdin); exit(0 if d else 1)" 2>/dev/null; then
+        echo ""
+        printf "  ${C_GRAY}%-25s %-20s %-16s %s${C_RESET}\n" "ИМЯ" "ID" "IP" "СТАТУС"
+        print_separator "─" 64
+
+        echo "$vm_list" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+for vm in data:
+    name = vm.get('name', '???')
+    vid = vm.get('id', '???')
+    status = vm.get('status', '???')
+    ip = '—'
+    for iface in vm.get('network_interfaces', []):
+        nat = iface.get('primary_v4_address', {}).get('one_to_one_nat', {})
+        if 'address' in nat:
+            ip = nat['address']
+            break
+    print(f'  {name:<25} {vid:<20} {ip:<16} {status}')
+" 2>/dev/null
+
         echo ""
     fi
+
+    # Спрашиваем ID
+    info "Как найти ID виртуалки:"
+    printf_description "Скопируй ID из таблицы выше"
+    printf_description "Или: Яндекс Консоль → Compute Cloud → Виртуальные машины → ID"
+    echo ""
+
+    local instance_id
+    instance_id=$(ask_non_empty "Instance ID виртуалки (чей IP крутим)") || return
 
     # Спрашиваем префикс
     local prefix
@@ -259,18 +291,10 @@ _ipr_run_yandex() {
     if [[ $exit_code -eq 0 ]]; then
         ok "Красавчик! IP пойман."
 
-        # Определяем какой IP сейчас на виртуалке
+        # Определяем какой IP сейчас на виртуалке через yc API
         local caught_ip
-        caught_ip=$(curl -s --connect-timeout 3 --max-time 5 -H "Metadata-Flavor: Google" \
-            "http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip" 2>/dev/null)
-
-        if [[ -z "$caught_ip" ]]; then
-            # fallback через yc
-            local yc_bin="${HOME}/yandex-cloud/bin/yc"
-            command -v yc &>/dev/null && yc_bin="yc"
-            caught_ip=$("$yc_bin" compute instance get --id "$instance_id" --format json 2>/dev/null \
-                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['network_interfaces'][0]['primary_v4_address']['one_to_one_nat']['address'])" 2>/dev/null)
-        fi
+        caught_ip=$("$yc_bin" compute instance get --id "$instance_id" --format json 2>/dev/null \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['network_interfaces'][0]['primary_v4_address']['one_to_one_nat']['address'])" 2>/dev/null)
 
         echo ""
         if [[ -n "$caught_ip" ]]; then
@@ -295,9 +319,6 @@ _ipr_run_yandex() {
 # --- Меню ---
 
 show_ip_roller_menu() {
-    local is_yandex=0
-    _ipr_detect_yandex && is_yandex=1
-
     enable_graceful_ctrlc
     while true; do
         clear
@@ -305,11 +326,7 @@ show_ip_roller_menu() {
         printf_description "Прокрутка публичного IP до попадания в whitelist операторов."
         echo ""
 
-        if [[ $is_yandex -eq 1 ]]; then
-            printf_menu_option "1" "☁️  Яндекс Облако ${C_GREEN}(Обнаружено)${C_RESET}"
-        else
-            printf_menu_option "1" "☁️  Яндекс Облако ${C_RED}(Не подходит)${C_RESET}"
-        fi
+        printf_menu_option "1" "☁️  Яндекс Облако"
         echo ""
         printf_menu_option "b" "Назад"
         echo ""
@@ -319,12 +336,7 @@ show_ip_roller_menu() {
 
         case "$choice" in
             1)
-                if [[ $is_yandex -eq 1 ]]; then
-                    _ipr_run_yandex
-                else
-                    warn "Не-не-не, этот сервак не на Яндексе. Тут эта штука не прокатит."
-                    sleep 2
-                fi
+                _ipr_run_yandex
                 wait_for_enter
                 ;;
             b|B) break ;;
