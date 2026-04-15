@@ -77,6 +77,7 @@ show_widgets_menu() {
         fi
 
         echo "------------------------------------------------------"
+        printf_menu_option "a" "✅ Включить все виджеты"
         printf_menu_option "c" "🧹 Очистить кеш виджетов"
         printf_description "     - Заставляет все виджеты обновить данные при следующем показе."
         printf_menu_option "b" "🔙 Назад в главное меню"
@@ -87,9 +88,25 @@ show_widgets_menu() {
         if [[ "$choice" == "b" || "$choice" == "B" ]]; then
             break
         fi
+        if [[ "$choice" == "a" || "$choice" == "A" ]]; then
+            # Включаем все виджеты
+            local all_widgets=""
+            for idx in "${!available_widgets[@]}"; do
+                local w="${available_widgets[$idx]}"
+                if [[ -z "$all_widgets" ]]; then
+                    all_widgets="$w"
+                else
+                    all_widgets="$all_widgets,$w"
+                fi
+            done
+            set_config_var "ENABLED_WIDGETS" "$all_widgets"
+            ok "Все виджеты включены!"
+            sleep 1
+            continue
+        fi
         if [[ "$choice" == "c" || "$choice" == "C" ]]; then
             _clear_widget_cache
-            sleep 1; # Пауза, чтобы пользователь успел прочитать сообщение
+            sleep 1
             continue
         fi
 
