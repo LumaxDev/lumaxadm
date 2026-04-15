@@ -67,6 +67,57 @@ _ipr_ensure_installed() {
         fi
     fi
 
+    # Проверяем что yc авторизован
+    local yc_bin="${HOME}/yandex-cloud/bin/yc"
+    command -v yc &>/dev/null && yc_bin="yc"
+
+    if ! "$yc_bin" config list 2>/dev/null | grep -q "token"; then
+        warn "Yandex Cloud CLI установлен, но не настроен."
+        echo ""
+        info "Нужно пройти авторизацию. Это делается один раз."
+        echo ""
+        printf_description "${C_WHITE}1.${C_RESET} Открой в браузере:"
+        printf_description "${C_CYAN}https://oauth.yandex.ru/authorize?response_type=token&client_id=1a6990aa636648e9b2ef855fa7bec2fb${C_RESET}"
+        printf_description "${C_WHITE}2.${C_RESET} Скопируй токен и вставь сюда:"
+        echo ""
+
+        local oauth_token
+        oauth_token=$(safe_read "OAuth-токен" "") || return 1
+        if [[ -z "$oauth_token" ]]; then
+            err "Без токена никак, братан."
+            return 1
+        fi
+
+        info "Настраиваю yc CLI..."
+        if ! "$yc_bin" init --token="$oauth_token" 2>/dev/null; then
+            # Если --token не сработал, пробуем через config set
+            "$yc_bin" config set token "$oauth_token" 2>/dev/null
+        fi
+
+        # Проверяем что профиль получил folder-id
+        if ! "$yc_bin" config list 2>/dev/null | grep -q "folder-id"; then
+            info "Теперь нужно выбрать каталог (folder). Сейчас покажу список..."
+            echo ""
+            "$yc_bin" resource-manager folder list 2>/dev/null
+
+            echo ""
+            local folder_id
+            folder_id=$(safe_read "Вставь ID каталога из списка выше" "") || return 1
+            if [[ -n "$folder_id" ]]; then
+                "$yc_bin" config set folder-id "$folder_id"
+                ok "Каталог установлен."
+            fi
+        fi
+
+        # Финальная проверка
+        if "$yc_bin" config list 2>/dev/null | grep -q "token"; then
+            ok "Yandex Cloud CLI настроен!"
+        else
+            err "Что-то пошло не так. Попробуй вручную: ${yc_bin} init"
+            return 1
+        fi
+    fi
+
     # Скрипт roll_ip.py
     if [[ ! -f "$_IPR_SCRIPT_PATH" ]]; then
         info "Качаю скрипт IP-роллера..."
