@@ -6,23 +6,21 @@
 #   - Хочешь евро — поменяй USD на EUR в API_URL.
 #   - Лейбл "USD/RUB" можно переименовать, главное оставить двоеточие.
 
-API_URL="https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.json"
+# Способ 1: ЦБ РФ (XML API)
+rate=$(curl -s --connect-timeout 3 --max-time 5 "https://www.cbr.ru/scripts/XML_daily.asp" 2>/dev/null \
+    | grep -A1 "USD" | grep -o '<Value>[^<]*' | cut -d'>' -f2 | tr ',' '.')
 
-result=$(curl -s --connect-timeout 3 --max-time 5 "$API_URL" 2>/dev/null)
-
-if [ -z "$result" ]; then
-    echo "USD/RUB: нет связи"
-    exit 0
+# Способ 2: fallback на открытый JSON API
+if [ -z "$rate" ]; then
+    rate=$(curl -s --connect-timeout 3 --max-time 5 \
+        "https://api.exchangerate-api.com/v4/latest/USD" 2>/dev/null \
+        | grep -o '"RUB":[0-9.]*' | cut -d: -f2)
 fi
-
-rate=$(echo "$result" | grep -o '"rub":[0-9.]*' | cut -d: -f2)
 
 if [ -z "$rate" ]; then
     echo "USD/RUB: нет данных"
     exit 0
 fi
 
-# Округляем до 2 знаков
 rate_short=$(printf "%.2f" "$rate" 2>/dev/null || echo "$rate")
-
 echo "USD/RUB: ${rate_short}₽"
