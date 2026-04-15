@@ -1,7 +1,7 @@
 #!/bin/bash
 #   ( РОДИТЕЛЬ | КЛАВИША | НАЗВАНИЕ | ФУНКЦИЯ | ПОРЯДОК | ГРУППА | ОПИСАНИЕ )
 # @menu.manifest
-# @item( security | 4 | 🔍 Сканер Rootkit | show_rkhunter_menu | 40 | 10 | Поиск вредоносного ПО и руткитов. )
+# @item( security | 5 | 🔍 Сканер Rootkit | show_rkhunter_menu | 40 | 10 | Поиск вредоносного ПО и руткитов. )
 #
 # rkhunter.sh - Управление сканером руткитов (rkhunter)
 #

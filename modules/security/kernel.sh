@@ -1,7 +1,7 @@
 #!/bin/bash
 #   ( РОДИТЕЛЬ | КЛАВИША | НАЗВАНИЕ | ФУНКЦИЯ | ПОРЯДОК | ГРУППА | ОПИСАНИЕ )
 # @menu.manifest
-# @item( security | 3 | 🧠 Kernel Hardening | show_kernel_menu | 30 | 10 | Усиление защиты ядра от сетевых атак. )
+# @item( security | 4 | 🧠 Kernel Hardening | show_kernel_menu | 30 | 10 | Усиление защиты ядра от сетевых атак. )
 #
 # kernel.sh - Kernel Hardening (sysctl)
 #
