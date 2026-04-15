@@ -117,6 +117,8 @@ show_diagnostics_menu() {
         if [[ "$SERVER_TYPE" == *"Панель"* ]]; then printf_menu_option "2" "📊 Логи Панели"; fi
         if [[ "$SERVER_TYPE" == *"Нода"* ]]; then printf_menu_option "3" "📡 Логи Ноды"; fi
         if [ "${BOT_DETECTED:-0}" -eq 1 ]; then printf_menu_option "4" "🤖 Логи Бота"; fi
+        echo ""
+        printf_menu_option "5" "🔬 Рентген Xray (подключения, DDoS-детект)"
         echo ""; printf_menu_option "b" "🔙 Назад"; print_separator "-" 60
         local choice; choice=$(safe_read "Какой лог курим?" "") || break
         case "$choice" in
@@ -124,6 +126,7 @@ show_diagnostics_menu() {
             2) if [[ "$SERVER_TYPE" == *"Панель"* ]]; then view_docker_logs "$PANEL_NODE_PATH" "Панели"; else printf_error "Панели нет."; fi;;
             3) if [[ "$SERVER_TYPE" == *"Нода"* ]]; then view_docker_logs "$PANEL_NODE_PATH" "Ноды"; else printf_error "Ноды нет."; fi;;
             4) if [ "${BOT_DETECTED:-0}" -eq 1 ]; then view_docker_logs "${BOT_PATH}/docker-compose.yml" "Бота"; else printf_error "Бота нет."; fi;;
+            5) run_module local/xray_scanner show_xray_scanner_menu ;;
             [bB]) break ;;
         esac
     done
