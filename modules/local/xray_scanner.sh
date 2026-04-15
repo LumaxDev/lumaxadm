@@ -16,21 +16,59 @@ readonly _XRS_DANGER_THRESHOLD=2000
 # --- Определение порта Xray ---
 
 _xrs_detect_xray_port() {
-    # Способ 1: ищем процесс xray и его порт
     local xray_port
+
+    # Способ 1: ищем контейнер remnanode и берём ВСЕ его проброшенные порты
+    if command -v docker &>/dev/null; then
+        local node_container
+        node_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep "remnanode" | head -1)
+
+        if [[ -n "$node_container" ]]; then
+            # docker port покажет все проброшенные порты, берём первый TCP
+            xray_port=$(docker port "$node_container" 2>/dev/null \
+                | grep -oE '0\.0\.0\.0:([0-9]+)' | head -1 | cut -d: -f2)
+
+            if [[ -n "$xray_port" ]]; then
+                echo "$xray_port"
+                return 0
+            fi
+
+            # Fallback: парсим из docker inspect (PortBindings)
+            xray_port=$(docker inspect "$node_container" \
+                --format '{{range $p, $conf := .HostConfig.PortBindings}}{{(index $conf 0).HostPort}}{{"\n"}}{{end}}' 2>/dev/null \
+                | head -1)
+
+            if [[ -n "$xray_port" ]]; then
+                echo "$xray_port"
+                return 0
+            fi
+
+            # Host network mode — берём порт из лога Xray внутри контейнера
+            xray_port=$(docker exec "$node_container" cat /var/log/remnanode/access.log 2>/dev/null \
+                | head -1 | grep -oE 'from [0-9.]+:[0-9]+' | head -1 | grep -oE ':[0-9]+$' | tr -d ':')
+            # Это порт клиента, не то — пробуем из конфига
+            xray_port=$(docker exec "$node_container" sh -c \
+                'grep -r "\"port\"" /etc/xray/*.json /etc/remnanode/*.json 2>/dev/null' \
+                | grep -oE '"port":\s*[0-9]+' | head -1 | grep -oE '[0-9]+')
+
+            if [[ -n "$xray_port" ]]; then
+                echo "$xray_port"
+                return 0
+            fi
+        fi
+    fi
+
+    # Способ 2: ищем процесс xray напрямую (без Docker)
     xray_port=$(ss -tlnp 2>/dev/null | grep -i "xray" | awk '{print $4}' | grep -oE '[0-9]+$' | head -1)
     if [[ -n "$xray_port" ]]; then
         echo "$xray_port"
         return 0
     fi
 
-    # Способ 2: ищем в docker-контейнерах
-    if command -v docker &>/dev/null; then
-        xray_port=$(docker ps --format '{{.Ports}}' 2>/dev/null | grep -oE '0\.0\.0\.0:[0-9]+' | head -1 | cut -d: -f2)
-        if [[ -n "$xray_port" ]]; then
-            echo "$xray_port"
-            return 0
-        fi
+    # Способ 3: проверяем 443 — стандартный порт для VLESS/Reality
+    if ss -tlnp 2>/dev/null | grep -q ":443 "; then
+        echo "443"
+        return 0
     fi
 
     return 1
