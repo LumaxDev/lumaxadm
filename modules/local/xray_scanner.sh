@@ -115,7 +115,7 @@ _xrs_show_report() {
     printf "  ${C_BOLD}${C_YELLOW}📊 ТОП-20 IP ПО КОЛИЧЕСТВУ СОЕДИНЕНИЙ${C_RESET}\n"
     print_separator "─" 64
     echo ""
-    printf "  ${C_GRAY}%-8s  %-18s  %s${C_RESET}\n" "КОНН." "IP-АДРЕС" "СТАТУС"
+    printf "  ${C_GRAY}%-10s %-22s %s${C_RESET}\n" "КОНН." "IP-АДРЕС" "СТАТУС"
     print_separator "─" 64
 
     local suspicious_ips=()
@@ -137,7 +137,7 @@ _xrs_show_report() {
             status_color="${C_GREEN}"
         fi
 
-        printf "  ${status_color}%-8s${C_RESET}  ${C_WHITE}%-18s${C_RESET}  ${status_color}%s${C_RESET}\n" "$count" "$ip" "$status_icon"
+        printf "  ${status_color}%-10s${C_RESET} ${C_WHITE}%-22s${C_RESET} ${status_color}%s${C_RESET}\n" "$count" "$ip" "$status_icon"
     done
 
     echo ""
@@ -288,19 +288,22 @@ _xrs_live_monitor() {
         printf "${C_WHITE}Соединений: ${C_BOLD}${total}${C_RESET}  |  "
         printf "${C_GRAY}$(date '+%H:%M:%S')${C_RESET}\n"
         print_separator "─" 64
-        printf "  ${C_GRAY}%-8s  %-18s  %s${C_RESET}\n" "КОНН." "IP-АДРЕС" "СТАТУС"
+        printf "  ${C_GRAY}%-10s %-22s %s${C_RESET}\n" "КОНН." "IP-АДРЕС" "СТАТУС"
         print_separator "─" 64
 
         _xrs_get_connections "$port" | head -15 | while read -r count ip; do
-            local status_color
+            local status_icon status_color
             if [[ "$count" -ge "$_XRS_DANGER_THRESHOLD" ]]; then
+                status_icon="🔴 ОПАСНО"
                 status_color="${C_RED}"
             elif [[ "$count" -ge "$_XRS_WARN_THRESHOLD" ]]; then
+                status_icon="🟡 Подозр."
                 status_color="${C_YELLOW}"
             else
+                status_icon="🟢 Норма"
                 status_color="${C_GREEN}"
             fi
-            printf "  ${status_color}%-8s${C_RESET}  ${C_WHITE}%-18s${C_RESET}\n" "$count" "$ip"
+            printf "  ${status_color}%-10s${C_RESET} ${C_WHITE}%-22s${C_RESET} ${status_color}%s${C_RESET}\n" "$count" "$ip" "$status_icon"
         done
 
         print_separator "─" 64
