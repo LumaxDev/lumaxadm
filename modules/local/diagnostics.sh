@@ -118,7 +118,7 @@ show_diagnostics_menu() {
         if [[ "$SERVER_TYPE" == *"Нода"* ]]; then printf_menu_option "3" "📡 Логи Ноды"; fi
         if [ "${BOT_DETECTED:-0}" -eq 1 ]; then printf_menu_option "4" "🤖 Логи Бота"; fi
         echo ""; printf_menu_option "b" "🔙 Назад"; print_separator "-" 60
-        local choice; choice=$(safe_read "Какой лог курим?: " "") || break
+        local choice; choice=$(safe_read "Какой лог курим?" "") || break
         case "$choice" in
             1) view_logs_realtime "$LOGFILE" "LumaxADM" ;;
             2) if [[ "$SERVER_TYPE" == *"Панель"* ]]; then view_docker_logs "$PANEL_NODE_PATH" "Панели"; else printf_error "Панели нет."; fi;;
