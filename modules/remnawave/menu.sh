@@ -57,7 +57,7 @@ _remna_install_node() {
     menu_header "📡 Установка Remnanode"
 
     info "Для установки ноды нужен секретный ключ из панели Remnawave."
-    printf_description "Найти его можно: Панель → Nodes → Add Node → Secret Key"
+    printf_description "Найти его можно: Панель -> Nodes -> Add Node -> Secret Key"
     echo ""
 
     local secret_key
@@ -109,6 +109,113 @@ _remna_run_node_script() {
     remnanode
 }
 
+_remna_setup_node_logs() {
+    clear
+    menu_header "📝 Настройка логов Remnanode"
+
+    info "После настройки логи ноды будут писаться в отдельные файлы:"
+    echo ""
+    printf_description "${C_WHITE}error:${C_RESET}  /var/log/remnanode/error.log"
+    printf_description "${C_WHITE}access:${C_RESET} /var/log/remnanode/access.log"
+    echo ""
+    printf_description "${C_GRAY}Логи будут автоматически ротироваться (макс. 50MB, 5 архивов).${C_RESET}"
+    echo ""
+
+    if ! ask_yes_no "Настроить логи?"; then
+        info "Отмена. Логи остаются как есть."
+        return
+    fi
+
+    echo ""
+    local compose_file="/opt/remnanode/docker-compose.yml"
+
+    if [[ ! -f "$compose_file" ]]; then
+        err "Файл ${compose_file} не найден. Нода установлена?"
+        return
+    fi
+
+    # Шаг 1: Создаём директорию
+    info "Создаю директорию /var/log/remnanode..."
+    run_cmd mkdir -p /var/log/remnanode
+    ok "Директория создана."
+
+    # Шаг 2: Добавляем volume в docker-compose.yml
+    info "Настраиваю docker-compose.yml..."
+    run_cmd cp "$compose_file" "${compose_file}.bak_lumaxadm_$(date +%s)"
+
+    if grep -q "/var/log/remnanode:/var/log/remnanode" "$compose_file"; then
+        ok "Volume для логов уже прописан в docker-compose.yml."
+    else
+        # Проверяем есть ли секция volumes
+        if grep -q "^[[:space:]]*volumes:" "$compose_file"; then
+            # volumes есть — добавляем строку после неё
+            run_cmd sed -i '/^[[:space:]]*volumes:/a \      - "/var/log/remnanode:/var/log/remnanode"' "$compose_file"
+        else
+            # volumes нет — добавляем перед env_file или в конец сервиса
+            if grep -q "env_file:" "$compose_file"; then
+                run_cmd sed -i '/env_file:/i \    volumes:\n      - "/var/log/remnanode:/var/log/remnanode"' "$compose_file"
+            else
+                # Крайний случай — добавляем перед последней строкой
+                echo '    volumes:' | run_cmd tee -a "$compose_file" >/dev/null
+                echo '      - "/var/log/remnanode:/var/log/remnanode"' | run_cmd tee -a "$compose_file" >/dev/null
+            fi
+        fi
+        ok "Volume добавлен в docker-compose.yml."
+    fi
+
+    # Шаг 3: Устанавливаем logrotate
+    info "Проверяю logrotate..."
+    if ! command -v logrotate &>/dev/null; then
+        info "Устанавливаю logrotate..."
+        run_cmd apt-get update -qq >/dev/null 2>&1
+        run_cmd apt-get install -y logrotate >/dev/null 2>&1
+        ok "logrotate установлен."
+    else
+        ok "logrotate уже есть."
+    fi
+
+    # Шаг 4: Создаём конфиг ротации логов
+    info "Настраиваю ротацию логов..."
+    cat > /tmp/_lumaxadm_logrotate_remnanode << 'LOGROTATE_EOF'
+/var/log/remnanode/*.log {
+    size 50M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+LOGROTATE_EOF
+    run_cmd cp /tmp/_lumaxadm_logrotate_remnanode /etc/logrotate.d/remnanode
+    run_cmd chmod 644 /etc/logrotate.d/remnanode
+    rm -f /tmp/_lumaxadm_logrotate_remnanode
+    ok "Конфиг ротации создан."
+
+    # Шаг 5: Тестируем logrotate
+    info "Проверяю конфиг logrotate..."
+    if logrotate -vf /etc/logrotate.d/remnanode >/dev/null 2>&1; then
+        ok "Logrotate работает корректно."
+    else
+        warn "Logrotate выдал предупреждение, но это нормально если логов ещё нет."
+    fi
+
+    # Шаг 6: Перезапускаем ноду
+    echo ""
+    info "Перезапускаю ноду чтобы подхватила новые настройки..."
+    if command -v remnanode &>/dev/null; then
+        remnanode restart >/dev/null 2>&1
+        ok "Нода перезапущена."
+    else
+        # Fallback через docker compose
+        (cd /opt/remnanode && docker compose down && docker compose up -d) >/dev/null 2>&1
+        ok "Нода перезапущена через docker compose."
+    fi
+
+    echo ""
+    ok "Готово! Логи настроены. Теперь access.log и error.log пишутся в /var/log/remnanode/"
+    info "Посмотреть: ${C_CYAN}tail -f /var/log/remnanode/access.log${C_RESET}"
+}
+
 # --- Меню ---
 
 show_remnawave_centre_menu() {
@@ -117,7 +224,6 @@ show_remnawave_centre_menu() {
         clear
         menu_header "💿 Remnawave — Панель и Нода"
         printf_description "Установка и управление VPN-инфраструктурой Remnawave."
-        echo ""
 
         local has_panel=0
         local has_node=0
@@ -128,6 +234,26 @@ show_remnawave_centre_menu() {
         _remna_node_installed && has_node=1
         _remna_panel_script_installed && has_panel_script=1
         _remna_node_script_installed && has_node_script=1
+
+        # Статус сверху
+        echo ""
+        printf "  ${C_GRAY}Панель:${C_RESET} "
+        if [[ $has_panel -eq 1 ]]; then
+            printf "${C_GREEN}установлена${C_RESET}"
+            [[ $has_panel_script -eq 1 ]] && printf " ${C_GRAY}| скрипт: ${C_GREEN}есть${C_RESET}" || printf " ${C_GRAY}| скрипт: ${C_RED}нет${C_RESET}"
+        else
+            printf "${C_GRAY}не обнаружена${C_RESET}"
+        fi
+        echo ""
+        printf "  ${C_GRAY}Нода:${C_RESET}   "
+        if [[ $has_node -eq 1 ]]; then
+            printf "${C_GREEN}установлена${C_RESET}"
+            [[ $has_node_script -eq 1 ]] && printf " ${C_GRAY}| скрипт: ${C_GREEN}есть${C_RESET}" || printf " ${C_GRAY}| скрипт: ${C_RED}нет${C_RESET}"
+        else
+            printf "${C_RED}не установлена${C_RESET}"
+        fi
+        echo ""
+        echo ""
 
         # Пункт 1: Панель (только если панель установлена в Docker)
         if [[ $has_panel -eq 1 ]]; then
@@ -147,28 +273,10 @@ show_remnawave_centre_menu() {
             printf_menu_option "2" "📡 Установить Remnanode ${C_CYAN}(нода ещё не стоит)${C_RESET}"
         fi
 
-        echo ""
-
-        # Статус
-        print_separator "─" 60
-        printf "  ${C_GRAY}Панель:${C_RESET} "
-        if [[ $has_panel -eq 1 ]]; then
-            printf "${C_GREEN}установлена${C_RESET}"
-            [[ $has_panel_script -eq 1 ]] && printf " ${C_GRAY}| скрипт: ${C_GREEN}есть${C_RESET}" || printf " ${C_GRAY}| скрипт: ${C_RED}нет${C_RESET}"
-        else
-            printf "${C_GRAY}не обнаружена на этом сервере${C_RESET}"
-        fi
-        echo ""
-
-        printf "  ${C_GRAY}Нода:${C_RESET}   "
+        # Пункт 3: Логи (только если нода есть)
         if [[ $has_node -eq 1 ]]; then
-            printf "${C_GREEN}установлена${C_RESET}"
-            [[ $has_node_script -eq 1 ]] && printf " ${C_GRAY}| скрипт: ${C_GREEN}есть${C_RESET}" || printf " ${C_GRAY}| скрипт: ${C_RED}нет${C_RESET}"
-        else
-            printf "${C_RED}не установлена${C_RESET}"
+            printf_menu_option "3" "📝 Сменить путь логов ${C_GRAY}(Опционально)${C_RESET}"
         fi
-        echo ""
-        print_separator "─" 60
 
         echo ""
         printf_menu_option "b" "Назад"
@@ -195,7 +303,6 @@ show_remnawave_centre_menu() {
                 if [[ $has_node -eq 1 && $has_node_script -eq 1 ]]; then
                     _remna_run_node_script
                 elif [[ $has_node -eq 1 ]]; then
-                    # Нода есть, скрипта нет — ставим скрипт
                     clear
                     menu_header "📡 Установка скрипта управления нодой"
                     info "Ставлю скрипт от Dignezzz..."
@@ -208,8 +315,15 @@ show_remnawave_centre_menu() {
                         err "Что-то пошло не так."
                     fi
                 else
-                    # Ноды нет — полная установка
                     _remna_install_node
+                fi
+                wait_for_enter
+                ;;
+            3)
+                if [[ $has_node -eq 1 ]]; then
+                    _remna_setup_node_logs
+                else
+                    warn "Нода не установлена — логи некуда менять."
                 fi
                 wait_for_enter
                 ;;
