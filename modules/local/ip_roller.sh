@@ -89,23 +89,41 @@ _ipr_ensure_installed() {
         fi
 
         info "Настраиваю yc CLI..."
-        if ! "$yc_bin" init --token="$oauth_token" 2>/dev/null; then
-            # Если --token не сработал, пробуем через config set
-            "$yc_bin" config set token "$oauth_token" 2>/dev/null
-        fi
+        "$yc_bin" config set token "$oauth_token" 2>/dev/null
 
-        # Проверяем что профиль получил folder-id
-        if ! "$yc_bin" config list 2>/dev/null | grep -q "folder-id"; then
-            info "Теперь нужно выбрать каталог (folder). Сейчас покажу список..."
-            echo ""
-            "$yc_bin" resource-manager folder list 2>/dev/null
+        # Получаем список облаков и выбираем
+        local cloud_list
+        cloud_list=$("$yc_bin" resource-manager cloud list --format json 2>/dev/null)
+        local cloud_id
+        cloud_id=$(echo "$cloud_list" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if d else '')" 2>/dev/null)
 
-            echo ""
-            local folder_id
-            folder_id=$(safe_read "Вставь ID каталога из списка выше" "") || return 1
-            if [[ -n "$folder_id" ]]; then
-                "$yc_bin" config set folder-id "$folder_id"
-                ok "Каталог установлен."
+        if [[ -n "$cloud_id" ]]; then
+            "$yc_bin" config set cloud-id "$cloud_id" 2>/dev/null
+
+            # Получаем список каталогов
+            info "Ищу каталоги в облаке..."
+            local folder_list
+            folder_list=$("$yc_bin" resource-manager folder list --format json 2>/dev/null)
+            local folder_count
+            folder_count=$(echo "$folder_list" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+
+            if [[ "$folder_count" == "1" ]]; then
+                # Один каталог — берём автоматом
+                local folder_id
+                folder_id=$(echo "$folder_list" | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['id'])" 2>/dev/null)
+                "$yc_bin" config set folder-id "$folder_id" 2>/dev/null
+                ok "Каталог выбран автоматически."
+            elif [[ "$folder_count" -gt 1 ]]; then
+                # Несколько — показываем список
+                echo ""
+                "$yc_bin" resource-manager folder list 2>/dev/null
+                echo ""
+                local folder_id
+                folder_id=$(safe_read "Вставь ID нужного каталога" "") || return 1
+                if [[ -n "$folder_id" ]]; then
+                    "$yc_bin" config set folder-id "$folder_id" 2>/dev/null
+                    ok "Каталог установлен."
+                fi
             fi
         fi
 
