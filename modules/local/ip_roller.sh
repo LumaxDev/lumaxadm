@@ -71,8 +71,22 @@ _ipr_ensure_installed() {
     local yc_bin="${HOME}/yandex-cloud/bin/yc"
     command -v yc &>/dev/null && yc_bin="yc"
 
+    # Проверяем что токен не просто есть, а реально рабочий
+    local _yc_needs_setup=0
     if ! "$yc_bin" config list 2>/dev/null | grep -q "token"; then
-        warn "Yandex Cloud CLI установлен, но не настроен."
+        _yc_needs_setup=1
+    elif ! "$yc_bin" resource-manager cloud list --format json 2>/dev/null | grep -q "id"; then
+        warn "Токен Yandex Cloud невалидный или просрочен."
+        if ask_yes_no "Перенастроить авторизацию?"; then
+            _yc_needs_setup=1
+        else
+            err "Без рабочего токена ловля IP не заработает."
+            return 1
+        fi
+    fi
+
+    if [[ $_yc_needs_setup -eq 1 ]]; then
+        warn "Yandex Cloud CLI нужно настроить."
         echo ""
         info "Нужно пройти авторизацию. Это делается один раз."
         echo ""
