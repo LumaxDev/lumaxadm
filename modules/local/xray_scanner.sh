@@ -398,36 +398,108 @@ _xrs_investigate_ip() {
     fi
 
     if [[ $has_logs -eq 1 ]]; then
-        # Торренты
-        local torrent_count
-        torrent_count=$(grep "$target_ip" "$access_log" 2>/dev/null | grep -ciE "torrent|tracker|announce|peer" || echo 0)
-        if [[ "$torrent_count" -gt 0 ]]; then
-            verdict_score=$((verdict_score + 2))
-            verdicts+=("${C_RED}● Обнаружен торрент-трафик (${torrent_count} запросов)${C_RESET}")
-        fi
-
-        # Много BLOCK'ов
-        local block_count
-        block_count=$(grep "$target_ip" "$access_log" 2>/dev/null | grep -c "BLOCK" || echo 0)
         local total_requests
         total_requests=$(grep -c "$target_ip" "$access_log" 2>/dev/null || echo 0)
 
+        # --- Торренты (строгий паттерн: только реальные торрент-протоколы) ---
+        local torrent_count
+        torrent_count=$(grep "$target_ip" "$access_log" 2>/dev/null \
+            | grep -ciE "torrent|\.tracker\.|/announce|bittorrent|bt\..*tracker" || echo 0)
+        if [[ "$torrent_count" -gt 5 ]]; then
+            verdict_score=$((verdict_score + 3))
+            verdicts+=("${C_RED}● Торрент-трафик: ${torrent_count} запросов к трекерам${C_RESET}")
+        elif [[ "$torrent_count" -gt 0 ]]; then
+            verdict_score=$((verdict_score + 1))
+            verdicts+=("${C_YELLOW}● Возможный торрент: ${torrent_count} запросов (немного, может быть ложное)${C_RESET}")
+        else
+            verdicts+=("${C_GREEN}● Торрент-трафик не обнаружен${C_RESET}")
+        fi
+
+        # --- Процент BLOCK ---
+        local block_count
+        block_count=$(grep "$target_ip" "$access_log" 2>/dev/null | grep -c "BLOCK" || echo 0)
+
         if [[ "$total_requests" -gt 0 ]]; then
             local block_pct=$(( (block_count * 100) / total_requests ))
-            if [[ "$block_pct" -gt 50 ]]; then
+            if [[ "$block_pct" -gt 70 ]]; then
+                verdict_score=$((verdict_score + 2))
+                verdicts+=("${C_RED}● ${block_pct}% запросов заблокировано — очень подозрительно${C_RESET}")
+            elif [[ "$block_pct" -gt 30 ]]; then
                 verdict_score=$((verdict_score + 1))
-                verdicts+=("${C_YELLOW}● ${block_pct}% запросов заблокировано Xray — подозрительная активность${C_RESET}")
+                verdicts+=("${C_YELLOW}● ${block_pct}% запросов заблокировано — повышенный уровень${C_RESET}")
+            else
+                verdicts+=("${C_GREEN}● Только ${block_pct}% заблокировано — норма${C_RESET}")
             fi
         fi
 
-        # Один и тот же хост сотни раз
-        local top_host_count
-        top_host_count=$(grep "$target_ip" "$access_log" 2>/dev/null \
+        # --- Разнообразие хостов (мало разных = бот, много = человек) ---
+        local unique_hosts
+        unique_hosts=$(grep "$target_ip" "$access_log" 2>/dev/null \
             | grep -oE 'accepted (tcp|udp):[^ ]+' | sed 's/accepted [a-z]*://' | cut -d: -f1 \
-            | sort | uniq -c | sort -nr | head -1 | awk '{print $1}')
-        if [[ "${top_host_count:-0}" -gt 500 ]]; then
+            | sort -u | wc -l)
+        if [[ "$total_requests" -gt 100 && "$unique_hosts" -le 3 ]]; then
+            verdict_score=$((verdict_score + 2))
+            verdicts+=("${C_RED}● ${total_requests} запросов на всего ${unique_hosts} хоста — бот или DDoS${C_RESET}")
+        elif [[ "$unique_hosts" -gt 20 ]]; then
+            verdicts+=("${C_GREEN}● Ходит на ${unique_hosts} разных хостов — похоже на живого человека${C_RESET}")
+        else
+            verdicts+=("${C_WHITE}● Ходит на ${unique_hosts} хостов${C_RESET}")
+        fi
+
+        # --- Топ хост: DNS-резолверы не считаются ботом ---
+        local top_host_line
+        top_host_line=$(grep "$target_ip" "$access_log" 2>/dev/null \
+            | grep -oE 'accepted (tcp|udp):[^ ]+' | sed 's/accepted [a-z]*://' | cut -d: -f1 \
+            | sort | uniq -c | sort -nr | head -1)
+        local top_host_count top_host_name
+        top_host_count=$(echo "$top_host_line" | awk '{print $1}')
+        top_host_name=$(echo "$top_host_line" | awk '{print $2}')
+
+        # Исключаем DNS-резолверы и CDN из подозрений
+        local is_normal_host=0
+        if echo "$top_host_name" | grep -qE "^1\.1\.1\.|^8\.8\.[84]\.|^9\.9\.9\.|^1\.0\.0\.|dns|cloudflare|google\.com$"; then
+            is_normal_host=1
+        fi
+
+        if [[ "${top_host_count:-0}" -gt 500 && $is_normal_host -eq 0 ]]; then
             verdict_score=$((verdict_score + 1))
-            verdicts+=("${C_YELLOW}● Долбит один хост ${top_host_count} раз — похоже на бота${C_RESET}")
+            verdicts+=("${C_YELLOW}● Долбит ${top_host_name} ${top_host_count} раз${C_RESET}")
+        elif [[ "${top_host_count:-0}" -gt 500 && $is_normal_host -eq 1 ]]; then
+            verdicts+=("${C_GREEN}● Топ хост: ${top_host_name} (${top_host_count}×) — это DNS/CDN, нормально${C_RESET}")
+        fi
+
+        # --- Скорость запросов (запросов в минуту из последних записей) ---
+        local first_ts last_ts
+        first_ts=$(grep "$target_ip" "$access_log" 2>/dev/null | head -1 | grep -oE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}')
+        last_ts=$(grep "$target_ip" "$access_log" 2>/dev/null | tail -1 | grep -oE '^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}')
+
+        if [[ -n "$first_ts" && -n "$last_ts" && "$first_ts" != "$last_ts" ]]; then
+            local first_epoch last_epoch
+            first_epoch=$(date -d "${first_ts//\//-}" +%s 2>/dev/null || echo 0)
+            last_epoch=$(date -d "${last_ts//\//-}" +%s 2>/dev/null || echo 0)
+            local time_span=$(( last_epoch - first_epoch ))
+
+            if [[ "$time_span" -gt 0 ]]; then
+                local rpm=$(( (total_requests * 60) / time_span ))
+                if [[ "$rpm" -gt 100 ]]; then
+                    verdict_score=$((verdict_score + 2))
+                    verdicts+=("${C_RED}● Скорость: ~${rpm} запросов/мин — агрессивный флуд${C_RESET}")
+                elif [[ "$rpm" -gt 30 ]]; then
+                    verdict_score=$((verdict_score + 1))
+                    verdicts+=("${C_YELLOW}● Скорость: ~${rpm} запросов/мин — высокая активность${C_RESET}")
+                else
+                    verdicts+=("${C_GREEN}● Скорость: ~${rpm} запросов/мин — нормально${C_RESET}")
+                fi
+            fi
+        fi
+
+        # --- Подозрительные паттерны в хостах ---
+        local scan_count
+        scan_count=$(grep "$target_ip" "$access_log" 2>/dev/null \
+            | grep -ciE "\.onion|proxy|socks|hack|exploit|shell|phish|malware|botnet|c2\." || echo 0)
+        if [[ "$scan_count" -gt 0 ]]; then
+            verdict_score=$((verdict_score + 3))
+            verdicts+=("${C_RED}● Обращения к подозрительным хостам (${scan_count}×): возможно malware/C2${C_RESET}")
         fi
     fi
 
@@ -436,12 +508,14 @@ _xrs_investigate_ip() {
     done
 
     echo ""
-    if [[ $verdict_score -ge 3 ]]; then
+    if [[ $verdict_score -ge 4 ]]; then
         printf "  ${C_BOLD}${C_RED}⛔ РЕКОМЕНДАЦИЯ: Этот IP стоит заблочить. Похоже на абуз или DDoS.${C_RESET}\n"
     elif [[ $verdict_score -ge 2 ]]; then
         printf "  ${C_BOLD}${C_YELLOW}⚠️  РЕКОМЕНДАЦИЯ: Подозрительная активность. Стоит последить.${C_RESET}\n"
+    elif [[ $verdict_score -ge 1 ]]; then
+        printf "  ${C_BOLD}${C_WHITE}ℹ️  Мелкие зацепки, но скорее всего нормальный юзер.${C_RESET}\n"
     else
-        printf "  ${C_BOLD}${C_GREEN}✅ Похоже на обычного пользователя. Всё ок.${C_RESET}\n"
+        printf "  ${C_BOLD}${C_GREEN}✅ Чистый юзер. Никаких подозрений.${C_RESET}\n"
     fi
 
     # Чистим временные файлы
