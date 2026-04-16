@@ -399,12 +399,14 @@ _xrs_investigate_ip() {
 
     if [[ $has_logs -eq 1 ]]; then
         local total_requests
-        total_requests=$(grep -c "$target_ip" "$access_log" 2>/dev/null || echo 0)
+        total_requests=$(grep -c "$target_ip" "$access_log" 2>/dev/null | tr -dc '0-9')
+        total_requests=${total_requests:-0}
 
         # --- Торренты (строгий паттерн: только реальные торрент-протоколы) ---
         local torrent_count
         torrent_count=$(grep "$target_ip" "$access_log" 2>/dev/null \
-            | grep -ciE "torrent|\.tracker\.|/announce|bittorrent|bt\..*tracker" || echo 0)
+            | grep -ciE "torrent|\.tracker\.|/announce|bittorrent|bt\..*tracker" | tr -dc '0-9')
+        torrent_count=${torrent_count:-0}
         if [[ "$torrent_count" -gt 5 ]]; then
             verdict_score=$((verdict_score + 3))
             verdicts+=("${C_RED}● Торрент-трафик: ${torrent_count} запросов к трекерам${C_RESET}")
@@ -417,7 +419,8 @@ _xrs_investigate_ip() {
 
         # --- Процент BLOCK ---
         local block_count
-        block_count=$(grep "$target_ip" "$access_log" 2>/dev/null | grep -c "BLOCK" || echo 0)
+        block_count=$(grep "$target_ip" "$access_log" 2>/dev/null | grep -c "BLOCK" | tr -dc '0-9')
+        block_count=${block_count:-0}
 
         if [[ "$total_requests" -gt 0 ]]; then
             local block_pct=$(( (block_count * 100) / total_requests ))
@@ -496,7 +499,8 @@ _xrs_investigate_ip() {
         # --- Подозрительные паттерны в хостах ---
         local scan_count
         scan_count=$(grep "$target_ip" "$access_log" 2>/dev/null \
-            | grep -ciE "\.onion|proxy|socks|hack|exploit|shell|phish|malware|botnet|c2\." || echo 0)
+            | grep -ciE "\.onion|proxy|socks|hack|exploit|shell|phish|malware|botnet|c2\." | tr -dc '0-9')
+        scan_count=${scan_count:-0}
         if [[ "$scan_count" -gt 0 ]]; then
             verdict_score=$((verdict_score + 3))
             verdicts+=("${C_RED}● Обращения к подозрительным хостам (${scan_count}×): возможно malware/C2${C_RESET}")
