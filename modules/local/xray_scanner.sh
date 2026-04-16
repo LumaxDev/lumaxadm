@@ -229,6 +229,225 @@ _xrs_block_ip() {
     esac
 }
 
+# --- Детальный анализ конкретного IP ---
+
+_xrs_investigate_ip() {
+    local port="$1"
+    clear
+    menu_header "🔍 Расследование IP"
+
+    local target_ip
+    target_ip=$(ask_non_empty "Введи IP для расследования") || return
+
+    if ! validate_ip "$target_ip"; then
+        err "Некорректный IP, братан."
+        return
+    fi
+
+    echo ""
+    print_separator "═" 64
+    printf "  ${C_BOLD}${C_CYAN}🔍 ДОСЬЕ НА ${target_ip}${C_RESET}\n"
+    print_separator "═" 64
+
+    # 1. Количество соединений прямо сейчас
+    local conn_count
+    conn_count=$(ss -nt "( sport = :${port} )" 2>/dev/null | grep "$target_ip" | wc -l)
+
+    echo ""
+    printf "  ${C_WHITE}TCP-соединений сейчас:${C_RESET}  ${C_BOLD}${conn_count}${C_RESET}"
+    if [[ "$conn_count" -ge "$_XRS_DANGER_THRESHOLD" ]]; then
+        printf "  ${C_RED}🔴 ОПАСНО${C_RESET}"
+    elif [[ "$conn_count" -ge "$_XRS_WARN_THRESHOLD" ]]; then
+        printf "  ${C_YELLOW}🟡 Подозрительно${C_RESET}"
+    else
+        printf "  ${C_GREEN}🟢 Норма${C_RESET}"
+    fi
+    echo ""
+
+    # 2. На какие хосты ходит (из access.log ноды)
+    local access_log="/var/log/remnanode/access.log"
+    local has_logs=0
+
+    if [[ -f "$access_log" ]]; then
+        has_logs=1
+    elif command -v docker &>/dev/null; then
+        local node_container
+        node_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep "remnanode" | head -1)
+        if [[ -n "$node_container" ]]; then
+            # Вытаскиваем логи из контейнера во временный файл
+            docker exec "$node_container" cat /var/log/remnanode/access.log > /tmp/_xrs_access_log_$$ 2>/dev/null
+            if [[ -s /tmp/_xrs_access_log_$$ ]]; then
+                access_log="/tmp/_xrs_access_log_$$"
+                has_logs=1
+            fi
+        fi
+    fi
+
+    if [[ $has_logs -eq 1 ]]; then
+        echo ""
+        print_separator "─" 64
+        printf "  ${C_BOLD}${C_YELLOW}🌐 КУДА ХОДИТ (топ-15 хостов)${C_RESET}\n"
+        print_separator "─" 64
+        echo ""
+
+        local destinations
+        destinations=$(grep "$target_ip" "$access_log" 2>/dev/null \
+            | grep -oE 'accepted (tcp|udp):[^ ]+' \
+            | sed 's/accepted [a-z]*://' \
+            | cut -d: -f1 \
+            | sort | uniq -c | sort -nr | head -15)
+
+        if [[ -n "$destinations" ]]; then
+            printf "  ${C_GRAY}%-8s %s${C_RESET}\n" "ЗАПР." "ХОСТ"
+            print_separator "─" 64
+            echo "$destinations" | while read -r count host; do
+                local flag=""
+                # Детект подозрительных паттернов
+                if echo "$host" | grep -qiE "torrent|tracker|announce|peer"; then
+                    flag="${C_RED} ⚠️ ТОРРЕНТ${C_RESET}"
+                elif echo "$host" | grep -qiE "\.ru$|\.ru:|yandex|mail\.ru|vk\.com"; then
+                    flag="${C_GRAY} (RU)${C_RESET}"
+                elif echo "$host" | grep -qiE "google|youtube|gstatic|googleapis"; then
+                    flag="${C_GRAY} (Google)${C_RESET}"
+                elif echo "$host" | grep -qiE "facebook|instagram|meta|fbcdn"; then
+                    flag="${C_GRAY} (Meta)${C_RESET}"
+                elif echo "$host" | grep -qiE "tiktok|musical\.ly|bytedance"; then
+                    flag="${C_GRAY} (TikTok)${C_RESET}"
+                elif echo "$host" | grep -qiE "xiaomi|miui|intl\.xiaomi"; then
+                    flag="${C_YELLOW} ⚠️ Xiaomi spam${C_RESET}"
+                fi
+                printf "  ${C_WHITE}%-8s${C_RESET} %s%b\n" "$count" "$host" "$flag"
+            done
+        else
+            printf "  ${C_GRAY}Нет данных в логах для этого IP.${C_RESET}\n"
+        fi
+
+        # 3. Типы действий (BLOCK / IPv4 / DIRECT)
+        echo ""
+        print_separator "─" 64
+        printf "  ${C_BOLD}${C_YELLOW}📊 ДЕЙСТВИЯ XRAY${C_RESET}\n"
+        print_separator "─" 64
+        echo ""
+
+        local actions
+        actions=$(grep "$target_ip" "$access_log" 2>/dev/null \
+            | grep -oE '\[.*->.*\]|\[.*>>.*\]' \
+            | sort | uniq -c | sort -nr)
+
+        if [[ -n "$actions" ]]; then
+            echo "$actions" | while read -r count action; do
+                local action_color="${C_WHITE}"
+                if echo "$action" | grep -q "BLOCK"; then
+                    action_color="${C_RED}"
+                elif echo "$action" | grep -q "DIRECT"; then
+                    action_color="${C_YELLOW}"
+                fi
+                printf "  ${action_color}%-8s %s${C_RESET}\n" "$count" "$action"
+            done
+        else
+            printf "  ${C_GRAY}Нет данных о действиях.${C_RESET}\n"
+        fi
+
+        # 4. Email (user ID) если есть
+        echo ""
+        print_separator "─" 64
+        printf "  ${C_BOLD}${C_YELLOW}👤 ПОЛЬЗОВАТЕЛИ (email/ID)${C_RESET}\n"
+        print_separator "─" 64
+        echo ""
+
+        local emails
+        emails=$(grep "$target_ip" "$access_log" 2>/dev/null \
+            | grep -oE 'email: [^ ]+' \
+            | sed 's/email: //' \
+            | sort | uniq -c | sort -nr | head -5)
+
+        if [[ -n "$emails" ]]; then
+            echo "$emails" | while read -r count email; do
+                printf "  ${C_WHITE}%-8s${C_RESET} ID: ${C_CYAN}%s${C_RESET}\n" "$count" "$email"
+            done
+        else
+            printf "  ${C_GRAY}Нет данных об email.${C_RESET}\n"
+        fi
+
+    else
+        echo ""
+        warn "Логи access.log не найдены. Настрой логи через Remnawave → Сменить путь логов."
+        echo ""
+        info "Без логов доступна только информация о соединениях."
+    fi
+
+    # 5. Вердикт
+    echo ""
+    print_separator "═" 64
+    printf "  ${C_BOLD}🧠 ВЕРДИКТ${C_RESET}\n"
+    print_separator "═" 64
+    echo ""
+
+    local verdict_score=0
+    local verdicts=()
+
+    # Много соединений
+    if [[ "$conn_count" -ge "$_XRS_DANGER_THRESHOLD" ]]; then
+        verdict_score=$((verdict_score + 3))
+        verdicts+=("${C_RED}● ${conn_count} соединений — это дохуя${C_RESET}")
+    elif [[ "$conn_count" -ge "$_XRS_WARN_THRESHOLD" ]]; then
+        verdict_score=$((verdict_score + 1))
+        verdicts+=("${C_YELLOW}● ${conn_count} соединений — многовато, но не критично${C_RESET}")
+    else
+        verdicts+=("${C_GREEN}● ${conn_count} соединений — в пределах нормы${C_RESET}")
+    fi
+
+    if [[ $has_logs -eq 1 ]]; then
+        # Торренты
+        local torrent_count
+        torrent_count=$(grep "$target_ip" "$access_log" 2>/dev/null | grep -ciE "torrent|tracker|announce|peer" || echo 0)
+        if [[ "$torrent_count" -gt 0 ]]; then
+            verdict_score=$((verdict_score + 2))
+            verdicts+=("${C_RED}● Обнаружен торрент-трафик (${torrent_count} запросов)${C_RESET}")
+        fi
+
+        # Много BLOCK'ов
+        local block_count
+        block_count=$(grep "$target_ip" "$access_log" 2>/dev/null | grep -c "BLOCK" || echo 0)
+        local total_requests
+        total_requests=$(grep -c "$target_ip" "$access_log" 2>/dev/null || echo 0)
+
+        if [[ "$total_requests" -gt 0 ]]; then
+            local block_pct=$(( (block_count * 100) / total_requests ))
+            if [[ "$block_pct" -gt 50 ]]; then
+                verdict_score=$((verdict_score + 1))
+                verdicts+=("${C_YELLOW}● ${block_pct}% запросов заблокировано Xray — подозрительная активность${C_RESET}")
+            fi
+        fi
+
+        # Один и тот же хост сотни раз
+        local top_host_count
+        top_host_count=$(grep "$target_ip" "$access_log" 2>/dev/null \
+            | grep -oE 'accepted (tcp|udp):[^ ]+' | sed 's/accepted [a-z]*://' | cut -d: -f1 \
+            | sort | uniq -c | sort -nr | head -1 | awk '{print $1}')
+        if [[ "${top_host_count:-0}" -gt 500 ]]; then
+            verdict_score=$((verdict_score + 1))
+            verdicts+=("${C_YELLOW}● Долбит один хост ${top_host_count} раз — похоже на бота${C_RESET}")
+        fi
+    fi
+
+    for v in "${verdicts[@]}"; do
+        printf "  %b\n" "$v"
+    done
+
+    echo ""
+    if [[ $verdict_score -ge 3 ]]; then
+        printf "  ${C_BOLD}${C_RED}⛔ РЕКОМЕНДАЦИЯ: Этот IP стоит заблочить. Похоже на абуз или DDoS.${C_RESET}\n"
+    elif [[ $verdict_score -ge 2 ]]; then
+        printf "  ${C_BOLD}${C_YELLOW}⚠️  РЕКОМЕНДАЦИЯ: Подозрительная активность. Стоит последить.${C_RESET}\n"
+    else
+        printf "  ${C_BOLD}${C_GREEN}✅ Похоже на обычного пользователя. Всё ок.${C_RESET}\n"
+    fi
+
+    # Чистим временные файлы
+    rm -f /tmp/_xrs_access_log_$$
+}
+
 # --- Авто-режим (быстрый скан) ---
 
 _xrs_quick_scan() {
@@ -306,6 +525,7 @@ show_xray_scanner_menu() {
         echo ""
         printf_menu_option "1" "📊 Полный отчёт (топ IP, аномалии)"
         printf_menu_option "2" "📡 Live-мониторинг (обновление каждые 5 сек)"
+        printf_menu_option "3" "🔍 Расследование IP (досье, сайты, вердикт)"
         printf_menu_option "p" "🔧 Указать порт вручную"
         echo ""
         printf_menu_option "b" "Назад"
@@ -331,6 +551,14 @@ show_xray_scanner_menu() {
                 else
                     _xrs_live_monitor "$xray_port"
                 fi
+                ;;
+            3)
+                if [[ -z "$xray_port" ]]; then
+                    warn "Порт не определён. Укажи через [p]."
+                else
+                    _xrs_investigate_ip "$xray_port"
+                fi
+                wait_for_enter
                 ;;
             p|P)
                 local new_port
