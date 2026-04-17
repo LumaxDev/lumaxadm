@@ -282,6 +282,108 @@ _remna_run_warp() {
     wtm
 }
 
+_remna_install_netbird() {
+    clear
+    menu_header "🐦 Установка NetBird"
+
+    info "Для подключения к сети NetBird нужен Setup Key."
+    printf_description "Найти его можно: ${C_CYAN}app.netbird.io${C_RESET} → Setup Keys → Create"
+    echo ""
+
+    local setup_key
+    setup_key=$(ask_non_empty "Setup Key") || return
+
+    echo ""
+    info "Устанавливаю NetBird..."
+    if curl -fsSL https://pkgs.netbird.io/install.sh | sh; then
+        echo ""
+        info "Подключаю к сети..."
+        netbird up --setup-key "$setup_key"
+        echo ""
+        if netbird status 2>/dev/null | grep -q "Connected"; then
+            ok "NetBird установлен и подключён! Красава."
+        else
+            ok "NetBird установлен. Проверь статус: ${C_CYAN}netbird status${C_RESET}"
+        fi
+    else
+        err "Не удалось установить NetBird."
+    fi
+}
+
+_remna_netbird_menu() {
+    enable_graceful_ctrlc
+    while true; do
+        clear
+        menu_header "🐦 NetBird — Управление"
+
+        # Статус
+        local nb_status
+        nb_status=$(netbird status 2>/dev/null | head -5)
+        if echo "$nb_status" | grep -q "Connected"; then
+            printf_description "Статус: ${C_GREEN}Подключён${C_RESET}"
+        elif echo "$nb_status" | grep -q "Disconnected"; then
+            printf_description "Статус: ${C_RED}Отключён${C_RESET}"
+        else
+            printf_description "Статус: ${C_YELLOW}Неизвестно${C_RESET}"
+        fi
+
+        local nb_ip
+        nb_ip=$(netbird status 2>/dev/null | grep -oE 'NetBird IP: [0-9./]+' | cut -d' ' -f3)
+        if [[ -n "$nb_ip" ]]; then
+            printf_description "NetBird IP: ${C_CYAN}${nb_ip}${C_RESET}"
+        fi
+
+        local nb_version
+        nb_version=$(netbird version 2>/dev/null | head -1)
+        if [[ -n "$nb_version" ]]; then
+            printf_description "Версия: ${C_GRAY}${nb_version}${C_RESET}"
+        fi
+
+        echo ""
+        printf_menu_option "1" "📊 Полный статус"
+        printf_menu_option "2" "🟢 Подключиться (up)"
+        printf_menu_option "3" "🔴 Отключиться (down)"
+        printf_menu_option "4" "🔄 Переподключить"
+        echo ""
+        printf_menu_option "b" "Назад"
+        echo ""
+
+        local choice
+        choice=$(safe_read "Выбирай" "") || break
+
+        case "$choice" in
+            1)
+                echo ""
+                netbird status
+                wait_for_enter
+                ;;
+            2)
+                info "Подключаюсь к NetBird..."
+                netbird up
+                ok "Готово."
+                wait_for_enter
+                ;;
+            3)
+                info "Отключаюсь от NetBird..."
+                netbird down
+                ok "Отключён."
+                wait_for_enter
+                ;;
+            4)
+                info "Переподключаюсь..."
+                netbird down 2>/dev/null
+                sleep 1
+                netbird up
+                ok "Переподключение завершено."
+                wait_for_enter
+                ;;
+            b|B) break ;;
+            *) warn "Нет такого пункта." && sleep 1 ;;
+        esac
+    done
+    disable_graceful_ctrlc
+}
+
 # --- Меню ---
 
 show_remnawave_centre_menu() {
@@ -353,11 +455,17 @@ show_remnawave_centre_menu() {
 
         echo ""
 
-        # --- WARP ---
+        # --- WARP & NetBird ---
         if _remna_warp_installed; then
             printf_menu_option "5" "🌀 Запустить WARP Manager ${C_GREEN}(wtm)${C_RESET}"
         else
             printf_menu_option "5" "🌀 Установить WARP ${C_YELLOW}(Dignezzz)${C_RESET}"
+        fi
+
+        if command -v netbird &>/dev/null; then
+            printf_menu_option "6" "🐦 Управление NetBird ${C_GREEN}(установлен)${C_RESET}"
+        else
+            printf_menu_option "6" "🐦 Установить NetBird ${C_YELLOW}(mesh VPN)${C_RESET}"
         fi
 
         echo ""
@@ -426,6 +534,14 @@ show_remnawave_centre_menu() {
                     _remna_install_warp
                 fi
                 wait_for_enter
+                ;;
+            6)
+                if command -v netbird &>/dev/null; then
+                    _remna_netbird_menu
+                else
+                    _remna_install_netbird
+                    wait_for_enter
+                fi
                 ;;
             b|B) break ;;
             *) warn "Нет такого пункта." && sleep 1 ;;
