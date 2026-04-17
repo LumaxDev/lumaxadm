@@ -381,54 +381,60 @@ _telemt_get_link() {
         return
     fi
 
-    ensure_dependencies "jq"
+    # Получаем публичный IP сервера
+    local public_ip
+    public_ip=$(curl -s --connect-timeout 3 --max-time 5 ifconfig.me 2>/dev/null)
+    if [[ -z "$public_ip" ]]; then
+        public_ip=$(curl -s --connect-timeout 3 --max-time 5 api.ipify.org 2>/dev/null)
+    fi
+    if [[ -z "$public_ip" ]]; then
+        public_ip=$(hostname -I | awk '{print $1}')
+    fi
 
-    local link_data
-    link_data=$(curl -s "${_TELEMT_API}/v1/users" 2>/dev/null)
+    # Получаем порт и secret из конфига
+    local port
+    port=$(grep "^port" "$_TELEMT_CONFIG" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+    port=${port:-443}
 
-    if [[ -z "$link_data" ]]; then
-        err "Не удалось получить данные из API. Проверь что API включён в конфиге."
+    # Получаем secret (первый пользователь)
+    local secret
+    secret=$(awk '/^\[access\.users\]/{found=1; next} found && /^[a-zA-Z]/{split($0,a,"\""); print a[2]; exit}' "$_TELEMT_CONFIG" 2>/dev/null)
+
+    if [[ -z "$secret" ]]; then
+        err "Не удалось прочитать secret из конфига."
         return
     fi
 
-    echo ""
-    echo "$link_data" | jq -r '.data[] | "  Юзер: \(.name // "unknown")\n  Подключений: \(.current_connections)\n  Уникальных IP: \(.active_unique_ips)\n  TLS ссылка:\n  \(.links.tls // "нет")\n"' 2>/dev/null
+    # Формируем ссылку вручную с правильным IP
+    local tls_link="tg://proxy?server=${public_ip}&port=${port}&secret=ee${secret}"
+
+    # Статистика из API
+    local conns=0 active_ips=0
+    if command -v jq &>/dev/null; then
+        local api_data
+        api_data=$(curl -s --connect-timeout 2 "${_TELEMT_API}/v1/users" 2>/dev/null)
+        if [[ -n "$api_data" ]]; then
+            conns=$(echo "$api_data" | jq -r '[.data[].current_connections] | add // 0' 2>/dev/null)
+            active_ips=$(echo "$api_data" | jq -r '[.data[].active_unique_ips] | add // 0' 2>/dev/null)
+        fi
+    fi
 
     echo ""
+    printf "  ${C_GRAY}IP сервера:${C_RESET}    ${C_WHITE}${public_ip}${C_RESET}\n"
+    printf "  ${C_GRAY}Порт:${C_RESET}          ${C_WHITE}${port}${C_RESET}\n"
+    printf "  ${C_GRAY}Подключений:${C_RESET}   ${C_CYAN}${conns}${C_RESET}\n"
+    printf "  ${C_GRAY}Уникальных IP:${C_RESET} ${C_CYAN}${active_ips}${C_RESET}\n"
+    echo ""
+
+    print_separator "═" 60
+    printf "  ${C_BOLD}${C_GREEN}🔗 ССЫЛКА ДЛЯ TELEGRAM:${C_RESET}\n"
     print_separator "─" 60
-    info "Скопируй TLS ссылку и вставь в настройки Telegram → Прокси."
-}
-
-_telemt_add_user() {
-    clear
-    menu_header "👤 Добавить пользователя"
-
-    local username
-    username=$(ask_non_empty "Имя нового пользователя") || return
-
-    local secret
-    secret=$(openssl rand -hex 16)
-
-    # Добавляем в конфиг
-    if grep -q "^\[access\.users\]" "$_TELEMT_CONFIG"; then
-        run_cmd sed -i "/^\[access\.users\]/a ${username} = \"${secret}\"" "$_TELEMT_CONFIG"
-    else
-        echo -e "\n[access.users]\n${username} = \"${secret}\"" | run_cmd tee -a "$_TELEMT_CONFIG" >/dev/null
-    fi
-
-    ok "Пользователь ${username} добавлен."
-    info "Secret: ${C_CYAN}${secret}${C_RESET}"
     echo ""
-
-    info "Перезапускаю telemt..."
-    run_cmd systemctl restart telemt.service
-    sleep 2
-
-    if _telemt_running; then
-        ok "Перезапущен. Новый юзер активен."
-    else
-        err "Сервис не запустился после изменения конфига."
-    fi
+    printf "  ${C_CYAN}${tls_link}${C_RESET}\n"
+    echo ""
+    print_separator "═" 60
+    echo ""
+    info "Скопируй ссылку → Telegram → Настройки → Прокси → Добавить."
 }
 
 _telemt_edit_config() {
@@ -482,11 +488,10 @@ _telemt_manage_menu() {
         echo ""
 
         printf_menu_option "1" "🔗 Получить ссылку для подключения"
-        printf_menu_option "2" "👤 Добавить пользователя"
         echo ""
-        printf_menu_option "3" "▶️  Запустить"
-        printf_menu_option "4" "⏹️  Остановить"
-        printf_menu_option "5" "🔄 Перезапустить"
+        printf_menu_option "2" "▶️  Запустить"
+        printf_menu_option "3" "⏹️  Остановить"
+        printf_menu_option "4" "🔄 Перезапустить"
         echo ""
         printf_menu_option "e" "📝 Редактировать конфиг"
         printf_menu_option "d" "🗑️  Удалить telemt ${C_RED}(полностью)${C_RESET}"
@@ -499,21 +504,20 @@ _telemt_manage_menu() {
 
         case "$choice" in
             1) _telemt_get_link; wait_for_enter ;;
-            2) _telemt_add_user; wait_for_enter ;;
-            3)
+            2)
                 info "Запускаю telemt..."
                 run_cmd systemctl start telemt.service
                 sleep 2
                 _telemt_running && ok "Запущен." || err "Не удалось запустить."
                 wait_for_enter
                 ;;
-            4)
+            3)
                 info "Останавливаю telemt..."
                 run_cmd systemctl stop telemt.service
                 ok "Остановлен."
                 wait_for_enter
                 ;;
-            5)
+            4)
                 info "Перезапускаю telemt..."
                 run_cmd systemctl restart telemt.service
                 sleep 2
