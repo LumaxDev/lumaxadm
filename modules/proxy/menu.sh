@@ -135,7 +135,7 @@ _telemt_install() {
     # --- Шаг 5: Имя пользователя ---
     echo ""
     local username
-    username=$(safe_read "Имя пользователя для прокси" "user") || return
+    username=$(safe_read "Имя пользователя для прокси" "telemt") || return
 
     # --- Подтверждение ---
     echo ""
@@ -181,6 +181,20 @@ _telemt_install() {
         return 1
     fi
 
+    # Определяем публичный IP для конфига
+    info "Определяю публичный IP сервера..."
+    local public_ip
+    public_ip=$(curl -s --connect-timeout 3 --max-time 5 ifconfig.me 2>/dev/null)
+    if [[ -z "$public_ip" ]]; then
+        public_ip=$(curl -s --connect-timeout 3 --max-time 5 api.ipify.org 2>/dev/null)
+    fi
+    if [[ -n "$public_ip" ]]; then
+        ok "Публичный IP: ${public_ip}"
+    else
+        warn "Не удалось определить IP. Ссылки могут быть некорректными."
+        public_ip=""
+    fi
+
     info "Создаю конфиг..."
     run_cmd mkdir -p /etc/telemt
 
@@ -191,10 +205,20 @@ _telemt_install() {
         ad_tag_line="# ad_tag = \"получи_в_@MTProxybot\""
     fi
 
+    local public_host_line=""
+    if [[ -n "$public_ip" ]]; then
+        public_host_line="public_host = \"${public_ip}\""
+    else
+        public_host_line="# public_host = \"твой_публичный_ip\""
+    fi
+
     cat > "$_TELEMT_CONFIG" << TELEMT_CONF
 [general]
 ${ad_tag_line}
 use_middle_proxy = true
+
+[general.links]
+${public_host_line}
 
 [general.modes]
 classic = false
@@ -203,7 +227,7 @@ tls = true
 
 [server]
 port = ${proxy_port}
-max_connections = 10000
+max_connections = 0
 
 [server.api]
 enabled = true
@@ -381,60 +405,70 @@ _telemt_get_link() {
         return
     fi
 
-    # Получаем публичный IP сервера
-    local public_ip
-    public_ip=$(curl -s --connect-timeout 3 --max-time 5 ifconfig.me 2>/dev/null)
-    if [[ -z "$public_ip" ]]; then
-        public_ip=$(curl -s --connect-timeout 3 --max-time 5 api.ipify.org 2>/dev/null)
-    fi
-    if [[ -z "$public_ip" ]]; then
-        public_ip=$(hostname -I | awk '{print $1}')
-    fi
+    ensure_dependencies "jq"
 
-    # Получаем порт и secret из конфига
-    local port
-    port=$(grep "^port" "$_TELEMT_CONFIG" 2>/dev/null | grep -oE '[0-9]+' | head -1)
-    port=${port:-443}
+    local api_data
+    api_data=$(curl -s --connect-timeout 3 "${_TELEMT_API}/v1/users" 2>/dev/null)
 
-    # Получаем secret (первый пользователь)
-    local secret
-    secret=$(awk '/^\[access\.users\]/{found=1; next} found && /^[a-zA-Z]/{split($0,a,"\""); print a[2]; exit}' "$_TELEMT_CONFIG" 2>/dev/null)
-
-    if [[ -z "$secret" ]]; then
-        err "Не удалось прочитать secret из конфига."
+    if [[ -z "$api_data" ]]; then
+        err "Не удалось получить данные из API."
         return
     fi
 
-    # Формируем ссылку вручную с правильным IP
-    local tls_link="tg://proxy?server=${public_ip}&port=${port}&secret=ee${secret}"
+    # Статистика
+    local conns active_ips
+    conns=$(echo "$api_data" | jq -r '[.data[].current_connections] | add // 0' 2>/dev/null)
+    active_ips=$(echo "$api_data" | jq -r '[.data[].active_unique_ips] | add // 0' 2>/dev/null)
 
-    # Статистика из API
-    local conns=0 active_ips=0
-    if command -v jq &>/dev/null; then
-        local api_data
-        api_data=$(curl -s --connect-timeout 2 "${_TELEMT_API}/v1/users" 2>/dev/null)
-        if [[ -n "$api_data" ]]; then
-            conns=$(echo "$api_data" | jq -r '[.data[].current_connections] | add // 0' 2>/dev/null)
-            active_ips=$(echo "$api_data" | jq -r '[.data[].active_unique_ips] | add // 0' 2>/dev/null)
+    # Получаем TLS ссылку из API
+    local tls_link
+    tls_link=$(echo "$api_data" | jq -r '.data[0].links.tls // empty' 2>/dev/null)
+
+    # Если ссылка — массив, берём первую
+    if [[ "$tls_link" == "["* ]]; then
+        tls_link=$(echo "$api_data" | jq -r '.data[0].links.tls[0] // empty' 2>/dev/null)
+    fi
+
+    # Если в ссылке локальный IP — подменяем на публичный
+    if echo "$tls_link" | grep -qE "server=(10\.|172\.|192\.168\.|127\.|::)" 2>/dev/null; then
+        local public_ip
+        public_ip=$(curl -s --connect-timeout 3 --max-time 5 ifconfig.me 2>/dev/null)
+        if [[ -z "$public_ip" ]]; then
+            public_ip=$(curl -s --connect-timeout 3 --max-time 5 api.ipify.org 2>/dev/null)
+        fi
+        if [[ -n "$public_ip" ]]; then
+            tls_link=$(echo "$tls_link" | sed -E "s/server=[^&]+/server=${public_ip}/")
         fi
     fi
 
+    # Публичный IP для отображения
+    local display_ip
+    display_ip=$(echo "$tls_link" | grep -oE 'server=[^&]+' | cut -d= -f2)
+
+    local port
+    port=$(grep "^port" "$_TELEMT_CONFIG" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+
     echo ""
-    printf "  ${C_GRAY}IP сервера:${C_RESET}    ${C_WHITE}${public_ip}${C_RESET}\n"
-    printf "  ${C_GRAY}Порт:${C_RESET}          ${C_WHITE}${port}${C_RESET}\n"
+    printf "  ${C_GRAY}IP сервера:${C_RESET}    ${C_WHITE}${display_ip:-?}${C_RESET}\n"
+    printf "  ${C_GRAY}Порт:${C_RESET}          ${C_WHITE}${port:-?}${C_RESET}\n"
     printf "  ${C_GRAY}Подключений:${C_RESET}   ${C_CYAN}${conns}${C_RESET}\n"
     printf "  ${C_GRAY}Уникальных IP:${C_RESET} ${C_CYAN}${active_ips}${C_RESET}\n"
     echo ""
 
-    print_separator "═" 60
-    printf "  ${C_BOLD}${C_GREEN}🔗 ССЫЛКА ДЛЯ TELEGRAM:${C_RESET}\n"
-    print_separator "─" 60
-    echo ""
-    printf "  ${C_CYAN}${tls_link}${C_RESET}\n"
-    echo ""
-    print_separator "═" 60
-    echo ""
-    info "Скопируй ссылку → Telegram → Настройки → Прокси → Добавить."
+    if [[ -n "$tls_link" ]]; then
+        print_separator "═" 60
+        printf "  ${C_BOLD}${C_GREEN}🔗 ССЫЛКА ДЛЯ TELEGRAM:${C_RESET}\n"
+        print_separator "─" 60
+        echo ""
+        printf "  ${C_CYAN}${tls_link}${C_RESET}\n"
+        echo ""
+        print_separator "═" 60
+        echo ""
+        info "Скопируй ссылку → Telegram → Настройки → Прокси → Добавить."
+    else
+        err "Ссылка не сгенерирована. Проверь конфиг — возможно не задан public_host."
+        printf_description "Добавь в конфиг: [general.links] public_host = \"ТВОЙ_IP\""
+    fi
 }
 
 _telemt_edit_config() {
@@ -450,6 +484,120 @@ _telemt_edit_config() {
             err "Сервис не запустился. Проверь конфиг на ошибки."
         fi
     fi
+}
+
+_telemt_change_domain() {
+    clear
+    menu_header "🌐 Смена домена маскировки"
+
+    local current_domain
+    current_domain=$(grep "tls_domain" "$_TELEMT_CONFIG" 2>/dev/null | cut -d'"' -f2)
+    printf_description "Текущий домен: ${C_CYAN}${current_domain:-не задан}${C_RESET}"
+    echo ""
+
+    printf_menu_option "1" "travel.yandex.ru"
+    printf_menu_option "2" "api-maps.yandex.ru"
+    printf_menu_option "3" "ads.x5.ru"
+    printf_menu_option "4" "api.perekrestok.ru"
+    printf_menu_option "5" "1c.ru"
+    printf_menu_option "s" "🔍 Сканировать (подобрать лучший)"
+    printf_menu_option "m" "Ввести свой"
+    echo ""
+
+    local domain_choice
+    domain_choice=$(safe_read "Выбери домен" "1") || return
+
+    local new_domain
+    case "$domain_choice" in
+        1) new_domain="travel.yandex.ru" ;;
+        2) new_domain="api-maps.yandex.ru" ;;
+        3) new_domain="ads.x5.ru" ;;
+        4) new_domain="api.perekrestok.ru" ;;
+        5) new_domain="1c.ru" ;;
+        s|S)
+            echo ""
+            info "Сканирую домены..."
+            local _scan_domains=("travel.yandex.ru" "api-maps.yandex.ru" "ads.x5.ru" "api.perekrestok.ru" "1c.ru" "rutube.ru" "sberbank.ru" "ozon.ru" "eh.vk.com")
+            local _best_domain="" _best_time=9999
+            for _d in "${_scan_domains[@]}"; do
+                local _ping_ms
+                _ping_ms=$(curl -so /dev/null -w '%{time_connect}' --connect-timeout 3 "https://${_d}" 2>/dev/null)
+                if [[ -n "$_ping_ms" && "$_ping_ms" != "0.000000" ]]; then
+                    local _ms
+                    _ms=$(echo "$_ping_ms * 1000" | bc 2>/dev/null | cut -d. -f1)
+                    _ms=${_ms:-9999}
+                    printf "  %-25s ${C_CYAN}%s ms${C_RESET}" "$_d" "$_ms"
+                    if [[ "$_ms" -lt "$_best_time" ]]; then
+                        _best_time=$_ms
+                        _best_domain=$_d
+                        printf "  ${C_GREEN}← лучший${C_RESET}"
+                    fi
+                    echo ""
+                fi
+            done
+            echo ""
+            new_domain="${_best_domain:-travel.yandex.ru}"
+            ok "Лучший: ${new_domain} (${_best_time} ms)"
+            ;;
+        m|M) new_domain=$(ask_non_empty "Введи домен") || return ;;
+        *) new_domain="travel.yandex.ru" ;;
+    esac
+
+    if [[ "$new_domain" == "$current_domain" ]]; then
+        info "Домен не изменился."
+        return
+    fi
+
+    run_cmd sed -i "s|tls_domain = \".*\"|tls_domain = \"${new_domain}\"|" "$_TELEMT_CONFIG"
+    ok "Домен изменён на: ${new_domain}"
+
+    info "Перезапускаю telemt..."
+    run_cmd systemctl restart telemt.service
+    sleep 2
+    _telemt_running && ok "Перезапущен." || err "Сервис не запустился."
+}
+
+_telemt_change_ad_tag() {
+    clear
+    menu_header "🏷️ Изменение Ad Tag"
+
+    local current_tag
+    current_tag=$(grep "^ad_tag" "$_TELEMT_CONFIG" 2>/dev/null | cut -d'"' -f2)
+
+    if [[ -n "$current_tag" ]]; then
+        printf_description "Текущий Ad Tag: ${C_CYAN}${current_tag}${C_RESET}"
+    else
+        printf_description "Ad Tag: ${C_RED}не задан${C_RESET}"
+    fi
+
+    echo ""
+    info "Получить Ad Tag: Telegram → @MTProxybot → /newproxy"
+    echo ""
+
+    local new_tag
+    new_tag=$(safe_read "Новый Ad Tag (или Enter чтобы оставить)" "") || return
+
+    if [[ -z "$new_tag" ]]; then
+        info "Ничего не изменено."
+        return
+    fi
+
+    # Если ad_tag был закомментирован — раскомментируем и заменяем
+    if grep -q "^# ad_tag" "$_TELEMT_CONFIG"; then
+        run_cmd sed -i "s|^# ad_tag.*|ad_tag = \"${new_tag}\"|" "$_TELEMT_CONFIG"
+    elif grep -q "^ad_tag" "$_TELEMT_CONFIG"; then
+        run_cmd sed -i "s|^ad_tag = \".*\"|ad_tag = \"${new_tag}\"|" "$_TELEMT_CONFIG"
+    else
+        # Добавляем после [general]
+        run_cmd sed -i "/^\[general\]/a ad_tag = \"${new_tag}\"" "$_TELEMT_CONFIG"
+    fi
+
+    ok "Ad Tag обновлён."
+
+    info "Перезапускаю telemt..."
+    run_cmd systemctl restart telemt.service
+    sleep 2
+    _telemt_running && ok "Перезапущен." || err "Сервис не запустился."
 }
 
 _telemt_uninstall() {
@@ -493,7 +641,10 @@ _telemt_manage_menu() {
         printf_menu_option "3" "⏹️  Остановить"
         printf_menu_option "4" "🔄 Перезапустить"
         echo ""
+        printf_menu_option "5" "🌐 Сменить домен маскировки"
+        printf_menu_option "6" "🏷️  Изменить Ad Tag"
         printf_menu_option "e" "📝 Редактировать конфиг"
+        echo ""
         printf_menu_option "d" "🗑️  Удалить telemt ${C_RED}(полностью)${C_RESET}"
         echo ""
         printf_menu_option "b" "Назад"
@@ -524,6 +675,8 @@ _telemt_manage_menu() {
                 _telemt_running && ok "Перезапущен." || err "Не удалось перезапустить."
                 wait_for_enter
                 ;;
+            5) _telemt_change_domain; wait_for_enter ;;
+            6) _telemt_change_ad_tag; wait_for_enter ;;
             e|E) _telemt_edit_config; wait_for_enter ;;
             d|D)
                 _telemt_uninstall
