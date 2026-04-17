@@ -212,10 +212,25 @@ _telemt_install() {
         public_host_line="# public_host = \"твой_публичный_ip\""
     fi
 
+    # Определяем use_middle_proxy: true только если ad_tag задан
+    local use_middle_proxy="false"
+    if [[ -n "$ad_tag" ]]; then
+        use_middle_proxy="true"
+    fi
+
+    # NAT IP
+    local nat_ip_line=""
+    local internal_ip
+    internal_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    if [[ -n "$public_ip" && -n "$internal_ip" && "$public_ip" != "$internal_ip" ]]; then
+        nat_ip_line="middle_proxy_nat_ip = \"${public_ip}\""
+    fi
+
     cat > "$_TELEMT_CONFIG" << TELEMT_CONF
 [general]
 ${ad_tag_line}
-use_middle_proxy = true
+use_middle_proxy = ${use_middle_proxy}
+${nat_ip_line}
 
 [general.links]
 ${public_host_line}
@@ -237,6 +252,7 @@ enabled = true
 
 [censorship]
 tls_domain = "${tls_domain}"
+unknown_sni_action = "mask"
 
 [access.users]
 ${username} = "${secret}"
@@ -267,8 +283,8 @@ Restart=on-failure
 LimitNOFILE=1048576
 LimitNPROC=65535
 TasksMax=infinity
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
 NoNewPrivileges=true
 
 [Install]

@@ -41,7 +41,7 @@ _remna_install_panel_script() {
     menu_header "💿 Установка скрипта управления панелью"
     info "Ставлю скрипт от Dignezzz... Сейчас всё будет."
     echo ""
-    bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnawave.sh) @ install-script --name remnawave
+    curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnawave.sh -o /tmp/_lumaxadm_rw.sh && bash /tmp/_lumaxadm_rw.sh @ install-script --name remnawave; rm -f /tmp/_lumaxadm_rw.sh
     local exit_code=$?
     echo ""
     if [[ $exit_code -eq 0 ]] && command -v remnawave &>/dev/null; then
@@ -94,8 +94,8 @@ _remna_install_node() {
     print_separator
     echo ""
 
-    bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh) @ install \
-        --force --secret-key="$secret_key" --port="$node_port"
+    curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh -o /tmp/_lumaxadm_rn.sh && bash /tmp/_lumaxadm_rn.sh @ install \
+        --force --secret-key="$secret_key" --port="$node_port"; rm -f /tmp/_lumaxadm_rn.sh
 
     local exit_code=$?
     echo ""
@@ -241,7 +241,7 @@ _remna_install_selfsteal() {
     menu_header "🌐 Установка Caddy Selfsteal"
     info "Запускаю установщик от Dignezzz..."
     echo ""
-    bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh) @ install
+    curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh -o /tmp/_lumaxadm_ss.sh && bash /tmp/_lumaxadm_ss.sh @ install; rm -f /tmp/_lumaxadm_ss.sh
     echo ""
     if command -v selfsteal &>/dev/null; then
         ok "Caddy Selfsteal установлен!"
@@ -264,7 +264,7 @@ _remna_install_warp() {
     menu_header "🌀 Установка WARP"
     info "Запускаю установщик WARP от Dignezzz..."
     echo ""
-    sudo bash <(curl -sL https://github.com/DigneZzZ/remnawave-scripts/raw/main/wtm.sh) install-warp
+    curl -sL https://github.com/DigneZzZ/remnawave-scripts/raw/main/wtm.sh -o /tmp/_lumaxadm_wtm.sh && sudo bash /tmp/_lumaxadm_wtm.sh install-warp; rm -f /tmp/_lumaxadm_wtm.sh
     echo ""
     if command -v wtm &>/dev/null; then
         ok "WARP установлен!"
@@ -497,7 +497,7 @@ show_remnawave_centre_menu() {
                     menu_header "📡 Установка скрипта управления нодой"
                     info "Ставлю скрипт от Dignezzz..."
                     echo ""
-                    bash <(curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh) @ install-script --name remnanode
+                    curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh -o /tmp/_lumaxadm_rn.sh && bash /tmp/_lumaxadm_rn.sh @ install-script --name remnanode; rm -f /tmp/_lumaxadm_rn.sh
                     if command -v remnanode &>/dev/null; then
                         ok "Скрипт управления нодой установлен!"
                         info "Запустить можно командой: ${C_CYAN}remnanode${C_RESET}"
