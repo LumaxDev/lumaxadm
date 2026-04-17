@@ -181,21 +181,7 @@ _telemt_install() {
         return 1
     fi
 
-    # Определяем публичный IP для конфига
-    info "Определяю публичный IP сервера..."
-    local public_ip
-    public_ip=$(curl -s --connect-timeout 3 --max-time 5 ifconfig.me 2>/dev/null)
-    if [[ -z "$public_ip" ]]; then
-        public_ip=$(curl -s --connect-timeout 3 --max-time 5 api.ipify.org 2>/dev/null)
-    fi
-    if [[ -n "$public_ip" ]]; then
-        ok "Публичный IP: ${public_ip}"
-    else
-        warn "Не удалось определить IP. Ссылки могут быть некорректными."
-        public_ip=""
-    fi
-
-    info "Создаю конфиг..."
+    info "Создаю конфиг (IP определится автоматически через STUN)..."
     run_cmd mkdir -p /etc/telemt
 
     local ad_tag_line=""
@@ -205,35 +191,10 @@ _telemt_install() {
         ad_tag_line="# ad_tag = \"получи_в_@MTProxybot\""
     fi
 
-    local public_host_line=""
-    if [[ -n "$public_ip" ]]; then
-        public_host_line="public_host = \"${public_ip}\""
-    else
-        public_host_line="# public_host = \"твой_публичный_ip\""
-    fi
-
-    # Определяем use_middle_proxy: true только если ad_tag задан
-    local use_middle_proxy="false"
-    if [[ -n "$ad_tag" ]]; then
-        use_middle_proxy="true"
-    fi
-
-    # NAT IP
-    local nat_ip_line=""
-    local internal_ip
-    internal_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-    if [[ -n "$public_ip" && -n "$internal_ip" && "$public_ip" != "$internal_ip" ]]; then
-        nat_ip_line="middle_proxy_nat_ip = \"${public_ip}\""
-    fi
-
     cat > "$_TELEMT_CONFIG" << TELEMT_CONF
 [general]
 ${ad_tag_line}
-use_middle_proxy = ${use_middle_proxy}
-${nat_ip_line}
-
-[general.links]
-${public_host_line}
+use_middle_proxy = true
 
 [general.modes]
 classic = false
@@ -252,7 +213,6 @@ enabled = true
 
 [censorship]
 tls_domain = "${tls_domain}"
-unknown_sni_action = "mask"
 
 [access.users]
 ${username} = "${secret}"
