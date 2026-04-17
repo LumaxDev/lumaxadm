@@ -4,7 +4,7 @@
 # ============================================================ #
 #  ( РОДИТЕЛЬ | КЛАВИША | НАЗВАНИЕ | ФУНКЦИЯ | ПОРЯДОК | ГРУППА | ОПИСАНИЕ )
 # @menu.manifest
-# @item( main | 7 | 💿 Remnawave ${C_YELLOW}(Панель и Нода)${C_RESET} | show_remnawave_centre_menu | 40 | 3 | Установка и управление панелью Remnawave и нодами. )
+# @item( main | 7 | 💿 Remnawave ${C_YELLOW}(Панель, Нода, SelfSteal, WARP)${C_RESET} | show_remnawave_centre_menu | 40 | 3 | Установка и управление панелью Remnawave и нодами. )
 #
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 # Защита от прямого запуска
 
@@ -28,6 +28,10 @@ _remna_node_script_installed() {
 
 _remna_selfsteal_installed() {
     command -v selfsteal &>/dev/null
+}
+
+_remna_warp_installed() {
+    command -v wtm &>/dev/null
 }
 
 # --- Действия ---
@@ -255,6 +259,29 @@ _remna_run_selfsteal() {
     selfsteal
 }
 
+_remna_install_warp() {
+    clear
+    menu_header "🌀 Установка WARP"
+    info "Запускаю установщик WARP от Dignezzz..."
+    echo ""
+    sudo bash <(curl -sL https://github.com/DigneZzZ/remnawave-scripts/raw/main/wtm.sh) install-warp
+    echo ""
+    if command -v wtm &>/dev/null; then
+        ok "WARP установлен!"
+        info "Управлять можно командой: ${C_CYAN}wtm${C_RESET}"
+    else
+        err "Что-то пошло не так при установке."
+    fi
+}
+
+_remna_run_warp() {
+    clear
+    menu_header "🌀 WARP Manager"
+    info "Запускаю WARP Manager..."
+    echo ""
+    wtm
+}
+
 # --- Меню ---
 
 show_remnawave_centre_menu() {
@@ -294,7 +321,7 @@ show_remnawave_centre_menu() {
         echo ""
         echo ""
 
-        # Пункт 1: Панель (только если панель установлена в Docker)
+        # --- Управление ---
         if [[ $has_panel -eq 1 ]]; then
             if [[ $has_panel_script -eq 1 ]]; then
                 printf_menu_option "1" "🖥️  Запустить скрипт управления панелью ${C_GREEN}(Dignezzz)${C_RESET}"
@@ -303,7 +330,6 @@ show_remnawave_centre_menu() {
             fi
         fi
 
-        # Пункт 2: Нода (всегда виден)
         if [[ $has_node -eq 1 && $has_node_script -eq 1 ]]; then
             printf_menu_option "2" "📡 Запустить скрипт управления нодой ${C_GREEN}(Dignezzz)${C_RESET}"
         elif [[ $has_node -eq 1 ]]; then
@@ -312,18 +338,26 @@ show_remnawave_centre_menu() {
             printf_menu_option "2" "📡 Установить Remnanode ${C_CYAN}(нода ещё не стоит)${C_RESET}"
         fi
 
-        # Пункт 3: Логи (только если нода есть)
+        echo ""
+
+        # --- Доп. инструменты (только если нода есть) ---
         if [[ $has_node -eq 1 ]]; then
             printf_menu_option "3" "📝 Сменить путь логов ${C_GRAY}(Опционально)${C_RESET}"
-        fi
 
-        # Пункт 4: Selfsteal (только если нода есть)
-        if [[ $has_node -eq 1 ]]; then
             if _remna_selfsteal_installed; then
                 printf_menu_option "4" "🌐 Запустить Caddy Selfsteal ${C_GREEN}(Dignezzz)${C_RESET}"
             else
                 printf_menu_option "4" "🌐 Установить Caddy Selfsteal ${C_YELLOW}(Dignezzz)${C_RESET}"
             fi
+        fi
+
+        echo ""
+
+        # --- WARP ---
+        if _remna_warp_installed; then
+            printf_menu_option "5" "🌀 Запустить WARP Manager ${C_GREEN}(wtm)${C_RESET}"
+        else
+            printf_menu_option "5" "🌀 Установить WARP ${C_YELLOW}(Dignezzz)${C_RESET}"
         fi
 
         echo ""
@@ -382,6 +416,14 @@ show_remnawave_centre_menu() {
                     _remna_run_selfsteal
                 else
                     _remna_install_selfsteal
+                fi
+                wait_for_enter
+                ;;
+            5)
+                if _remna_warp_installed; then
+                    _remna_run_warp
+                else
+                    _remna_install_warp
                 fi
                 wait_for_enter
                 ;;
