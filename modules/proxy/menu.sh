@@ -600,6 +600,67 @@ _telemt_change_ad_tag() {
     _telemt_running && ok "Перезапущен." || err "Сервис не запустился."
 }
 
+_telemt_update() {
+    clear
+    menu_header "⬆️ Обновление telemt"
+
+    # Текущая версия
+    local current_ver
+    current_ver=$("$_TELEMT_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    current_ver=${current_ver:-"неизвестна"}
+    printf_description "Текущая версия: ${C_CYAN}${current_ver}${C_RESET}"
+
+    # Последняя версия с GitHub
+    info "Проверяю последнюю версию на GitHub..."
+    local latest_ver
+    latest_ver=$(curl -s --connect-timeout 5 "https://api.github.com/repos/telemt/telemt/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+    if [[ -z "$latest_ver" ]]; then
+        warn "Не удалось проверить последнюю версию. Обновляю принудительно."
+    else
+        printf_description "Последняя версия: ${C_GREEN}${latest_ver}${C_RESET}"
+        echo ""
+        if [[ "$current_ver" == "$latest_ver" ]]; then
+            ok "У тебя уже последняя версия. Обновление не требуется."
+            return
+        fi
+    fi
+
+    echo ""
+    if ! ask_yes_no "Обновить telemt?"; then
+        info "Отмена."
+        return
+    fi
+
+    info "Скачиваю новую версию..."
+    local arch
+    arch=$(uname -m)
+    local libc
+    libc=$(ldd --version 2>&1 | grep -iq musl && echo musl || echo gnu)
+
+    if wget -qO- "https://github.com/telemt/telemt/releases/latest/download/telemt-${arch}-linux-${libc}.tar.gz" | tar -xz -C /tmp/; then
+        run_cmd systemctl stop telemt.service 2>/dev/null || true
+        run_cmd mv /tmp/telemt "$_TELEMT_BIN"
+        run_cmd chmod +x "$_TELEMT_BIN"
+        ok "Бинарник обновлён."
+
+        info "Запускаю telemt..."
+        run_cmd systemctl start telemt.service
+        sleep 2
+
+        if _telemt_running; then
+            local new_ver
+            new_ver=$("$_TELEMT_BIN" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            ok "telemt обновлён до версии ${new_ver:-latest}!"
+        else
+            err "Сервис не запустился после обновления. Проверь логи: journalctl -u telemt -n 20"
+        fi
+    else
+        err "Не удалось скачать новую версию."
+    fi
+}
+
 _telemt_uninstall() {
     clear
     menu_header "🗑️ Удаление telemt"
@@ -643,6 +704,7 @@ _telemt_manage_menu() {
         echo ""
         printf_menu_option "5" "🌐 Сменить домен маскировки"
         printf_menu_option "6" "🏷️  Изменить Ad Tag"
+        printf_menu_option "7" "⬆️  Обновить telemt"
         printf_menu_option "e" "📝 Редактировать конфиг"
         echo ""
         printf_menu_option "d" "🗑️  Удалить telemt ${C_RED}(полностью)${C_RESET}"
@@ -677,6 +739,7 @@ _telemt_manage_menu() {
                 ;;
             5) _telemt_change_domain; wait_for_enter ;;
             6) _telemt_change_ad_tag; wait_for_enter ;;
+            7) _telemt_update; wait_for_enter ;;
             e|E) _telemt_edit_config; wait_for_enter ;;
             d|D)
                 _telemt_uninstall
