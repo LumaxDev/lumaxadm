@@ -514,6 +514,13 @@ JAIL
 
     ok "Файл jail.local создан."
 
+    # Если SSH логирует через systemd (нет /var/log/auth.log) — ставим backend = systemd
+    if [[ ! -f /var/log/auth.log ]]; then
+        info "SSH логирует через journald, настраиваю backend..."
+        echo -e '[sshd]\nbackend = systemd' > /etc/fail2ban/jail.d/sshd-backend.conf
+        ok "Backend переключён на systemd."
+    fi
+
     info "Включаю и перезапускаю сервис Fail2Ban..."
     run_cmd systemctl enable fail2ban
     run_cmd systemctl restart fail2ban
