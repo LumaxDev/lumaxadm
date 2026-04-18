@@ -164,30 +164,32 @@ _telemt_install() {
     local ad_tag
     ad_tag=$(safe_read "Ad Tag (Enter — пропустить)" "") || return
 
-    # --- Шаг 3: TLS домен ---
+    # --- Шаг 3: Self-Steal (Caddy) ---
     echo ""
-    info "Шаг 3: Домен для маскировки (TLS)"
-    printf_description "Прокси маскируется под HTTPS-соединение к этому домену."
-    echo ""
-    local tls_domain
-    tls_domain=$(_telemt_choose_domain) || return
-
-    # --- Шаг 4: Self-Steal (Caddy) ---
-    echo ""
-    info "Шаг 4: Настройка Self-Steal через Caddy"
-    printf_description "Caddy ставится на порт 443 и отдаёт фейковый сайт."
-    printf_description "telemt маскируется через него — максимальная защита от DPI."
+    info "Шаг 3: Настройка Self-Steal через Caddy"
+    printf_description "Caddy ставится на порт 443, отдаёт фейковый сайт на твоём домене."
+    printf_description "telemt маскируется под этот же сайт — DPI видит реальный сертификат."
+    printf_description "${C_YELLOW}Рекомендуется${C_RESET} — максимальная защита от блокировок."
     echo ""
     local setup_caddy=0
     local caddy_domain=""
+    local tls_domain=""
     if ask_yes_no "Настроить Self-Steal через Caddy?" "y"; then
         setup_caddy=1
-        caddy_domain=$(ask_non_empty "Домен для Caddy (твой домен, направленный на этот сервер)") || return
+        caddy_domain=$(ask_non_empty "Твой домен (DNS должен указывать на этот сервер)") || return
+        tls_domain="$caddy_domain"
+        ok "Домен маскировки = ${tls_domain} (Self-Steal)"
+    else
+        # Без Caddy — выбираем чужой домен для маскировки
+        echo ""
+        info "Без Self-Steal — выбери чужой .ru домен для маскировки:"
+        echo ""
+        tls_domain=$(_telemt_choose_domain) || return
     fi
 
-    # --- Шаг 5: Генерация secret ---
+    # --- Шаг 4: Генерация secret ---
     echo ""
-    info "Шаг 5: Генерирую секрет..."
+    info "Шаг 4: Генерирую секрет..."
     local secret
     secret=$(openssl rand -hex 16)
     ok "Secret: ${C_CYAN}${secret}${C_RESET}"
