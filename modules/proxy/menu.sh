@@ -163,7 +163,7 @@ _telemt_change_template() {
 
     # Текущий шаблон
     local current
-    current=$(grep "root \*" /etc/caddy/Caddyfile 2>/dev/null | sed 's|.*sni-templates/||; s|"||g; s| *||g')
+    current=$(grep "root \*" /etc/caddy/Caddyfile 2>/dev/null | sed 's|.*sni-templates/||; s|"||g' | xargs)
     printf_description "Текущий шаблон: ${C_CYAN}${current:-неизвестен}${C_RESET}"
 
     local selected
