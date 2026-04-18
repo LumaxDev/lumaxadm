@@ -78,6 +78,114 @@ _telemt_choose_domain() {
 
 # --- Тюнинг ядра (обязательный) ---
 
+# --- Выбор шаблона сайта ---
+
+_telemt_choose_template() {
+    local templates_dir="/var/www/sni-templates"
+
+    if [[ ! -d "$templates_dir" ]]; then
+        echo "downloader"
+        return
+    fi
+
+    >&2 echo ""
+    >&2 info "Выбери шаблон фейкового сайта:"
+    >&2 echo ""
+
+    local templates=()
+    local i=1
+    for dir in "$templates_dir"/*/; do
+        [[ ! -d "$dir" ]] && continue
+        local name
+        name=$(basename "$dir")
+        # Пропускаем скрытые и .git
+        [[ "$name" == .* ]] && continue
+        templates[$i]="$name"
+
+        # Проверяем есть ли v1/v2 внутри
+        local extra=""
+        if [[ -d "${dir}v1" && -d "${dir}v2" ]]; then
+            extra=" ${C_GRAY}(v1, v2)${C_RESET}"
+        fi
+        >&2 printf "   ${C_WHITE}[%d]${C_RESET} %s%b\n" "$i" "$name" "$extra"
+        ((i++))
+    done
+
+    if [[ ${#templates[@]} -eq 0 ]]; then
+        echo "downloader"
+        return
+    fi
+
+    >&2 echo ""
+    local choice
+    choice=$(safe_read "Номер шаблона" "1") || { echo "downloader"; return; }
+
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ -n "${templates[$choice]:-}" ]]; then
+        local selected="${templates[$choice]}"
+
+        # Если есть v1/v2 — спрашиваем
+        if [[ -d "${templates_dir}/${selected}/v1" && -d "${templates_dir}/${selected}/v2" ]]; then
+            >&2 echo ""
+            local ver
+            ver=$(safe_read "Версия (1 или 2)" "2") || ver="2"
+            echo "${selected}/v${ver}"
+        else
+            echo "$selected"
+        fi
+    else
+        echo "downloader"
+    fi
+}
+
+_telemt_change_template() {
+    clear
+    menu_header "🎨 Смена шаблона сайта"
+
+    if ! systemctl is-active --quiet caddy 2>/dev/null; then
+        warn "Caddy не установлен или не запущен. Self-Steal не настроен."
+        return
+    fi
+
+    local templates_dir="/var/www/sni-templates"
+
+    # Скачиваем/обновляем шаблоны если нет
+    if [[ ! -d "$templates_dir" ]] || [[ $(ls -A "$templates_dir" 2>/dev/null | grep -cv '^\.' ) -lt 3 ]]; then
+        info "Скачиваю шаблоны..."
+        run_cmd rm -rf "$templates_dir"
+        if git clone --quiet https://github.com/Famebloody/SNI-Templates.git "$templates_dir" 2>/dev/null; then
+            run_cmd chmod -R 775 "$templates_dir"
+            ok "Шаблоны обновлены."
+        else
+            err "Не удалось скачать шаблоны."
+            return
+        fi
+    fi
+
+    # Текущий шаблон
+    local current
+    current=$(grep "root \*" /etc/caddy/Caddyfile 2>/dev/null | sed 's|.*sni-templates/||; s|"||g; s| *||g')
+    printf_description "Текущий шаблон: ${C_CYAN}${current:-неизвестен}${C_RESET}"
+
+    local selected
+    selected=$(_telemt_choose_template)
+    selected=${selected:-downloader}
+
+    if [[ "$selected" == "$current" ]]; then
+        info "Шаблон не изменился."
+        return
+    fi
+
+    # Обновляем Caddyfile
+    run_cmd sed -i "s|root \* .*|root * /var/www/sni-templates/${selected}|" /etc/caddy/Caddyfile
+    run_cmd systemctl restart caddy
+
+    if systemctl is-active --quiet caddy; then
+        ok "Шаблон сменён на '${selected}'. Caddy перезапущен."
+    else
+        err "Caddy не запустился после смены шаблона."
+    fi
+}
+
 _telemt_apply_tuning() {
     info "Применяю тюнинг ядра для высокой нагрузки..."
 
@@ -332,24 +440,30 @@ SERVICE_EOF
 
     # Self-Steal: Caddy
     if [[ $setup_caddy -eq 1 ]]; then
-        info "Устанавливаю Caddy..."
-        run_cmd apt-get install -y caddy -qq >/dev/null 2>&1
+        info "Устанавливаю Caddy и git..."
+        run_cmd apt-get install -y caddy git -qq >/dev/null 2>&1
 
-        info "Скачиваю фейковый сайт-заглушку..."
-        run_cmd mkdir -p /var/www/fake
-        if git clone --quiet https://github.com/Famebloody/SNI-Templates.git /var/www/fake 2>/dev/null; then
-            run_cmd chmod -R 775 /var/www/fake
-            ok "Сайт-заглушка установлена."
+        # Скачиваем шаблоны
+        info "Скачиваю шаблоны сайтов..."
+        run_cmd rm -rf /var/www/sni-templates
+        if git clone --quiet https://github.com/Famebloody/SNI-Templates.git /var/www/sni-templates 2>/dev/null; then
+            run_cmd chmod -R 775 /var/www/sni-templates
+            ok "Шаблоны скачаны."
         else
-            warn "Не удалось скачать шаблон. Caddy будет отдавать пустую страницу."
-            run_cmd mkdir -p /var/www/fake/downloader
-            echo "<html><body>Welcome</body></html>" > /var/www/fake/downloader/index.html
+            warn "Не удалось скачать шаблоны. Создаю заглушку."
+            run_cmd mkdir -p /var/www/sni-templates/downloader
+            echo "<html><body>Welcome</body></html>" > /var/www/sni-templates/downloader/index.html
         fi
 
-        info "Настраиваю Caddy..."
+        # Выбор шаблона
+        local selected_template
+        selected_template=$(_telemt_choose_template)
+        selected_template=${selected_template:-downloader}
+
+        info "Настраиваю Caddy с шаблоном '${selected_template}'..."
         cat > /etc/caddy/Caddyfile << CADDY_CONF
 ${caddy_domain}:443 {
-    root * /var/www/fake/downloader
+    root * /var/www/sni-templates/${selected_template}
     try_files {path} /index.html
     file_server
 
@@ -361,7 +475,7 @@ CADDY_CONF
         run_cmd mkdir -p /var/log/caddy
         run_cmd systemctl restart caddy
         if systemctl is-active --quiet caddy; then
-            ok "Caddy запущен на 443 с доменом ${caddy_domain}"
+            ok "Caddy запущен на 443 — ${caddy_domain} (шаблон: ${selected_template})"
         else
             warn "Caddy не запустился. Проверь: journalctl -u caddy -n 20"
         fi
@@ -685,6 +799,9 @@ _telemt_manage_menu() {
         printf_menu_option "5" "🌐 Сменить домен маскировки"
         printf_menu_option "6" "🏷️  Изменить Ad Tag"
         printf_menu_option "7" "⬆️  Обновить telemt"
+        if systemctl is-active --quiet caddy 2>/dev/null; then
+            printf_menu_option "8" "🎨 Сменить шаблон сайта"
+        fi
         printf_menu_option "e" "📝 Редактировать конфиг"
         echo ""
         printf_menu_option "d" "🗑️  Удалить telemt ${C_RED}(полностью)${C_RESET}"
@@ -718,6 +835,7 @@ _telemt_manage_menu() {
             5) _telemt_change_domain; wait_for_enter ;;
             6) _telemt_change_ad_tag; wait_for_enter ;;
             7) _telemt_update; wait_for_enter ;;
+            8) _telemt_change_template; wait_for_enter ;;
             e|E) _telemt_edit_config; wait_for_enter ;;
             d|D)
                 _telemt_uninstall
