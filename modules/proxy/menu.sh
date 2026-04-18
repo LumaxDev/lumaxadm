@@ -176,7 +176,7 @@ _telemt_change_template() {
     fi
 
     # Обновляем Caddyfile
-    run_cmd sed -i "s|root \* .*|root * /var/www/sni-templates/${selected}|" /etc/caddy/Caddyfile
+    run_cmd sed -i "s|root \* .*|root * \"/var/www/sni-templates/${selected}\"|" /etc/caddy/Caddyfile
     run_cmd systemctl restart caddy
 
     if systemctl is-active --quiet caddy; then
@@ -463,7 +463,7 @@ SERVICE_EOF
         info "Настраиваю Caddy с шаблоном '${selected_template}'..."
         cat > /etc/caddy/Caddyfile << CADDY_CONF
 ${caddy_domain}:443 {
-    root * /var/www/sni-templates/${selected_template}
+    root * "/var/www/sni-templates/${selected_template}"
     try_files {path} /index.html
     file_server
 
