@@ -26,8 +26,8 @@ _telemt_running() {
 # --- Сканер доменов ---
 
 _telemt_scan_domains() {
-    info "Сканирую популярные .ru домены, ищу самый быстрый..."
-    echo ""
+    >&2 info "Сканирую популярные .ru домены, ищу самый быстрый..."
+    >&2 echo ""
     local _scan_domains=("travel.yandex.ru" "api-maps.yandex.ru" "ads.x5.ru" "api.perekrestok.ru" "1c.ru" "rutube.ru" "sberbank.ru" "ozon.ru" "eh.vk.com")
     local _best_domain="" _best_time=9999
 
@@ -38,28 +38,28 @@ _telemt_scan_domains() {
             local _ms
             _ms=$(echo "$_ping_ms * 1000" | bc 2>/dev/null | cut -d. -f1)
             _ms=${_ms:-9999}
-            printf "  %-25s ${C_CYAN}%s ms${C_RESET}" "$_d" "$_ms"
+            >&2 printf "  %-25s ${C_CYAN}%s ms${C_RESET}" "$_d" "$_ms"
             if [[ "$_ms" -lt "$_best_time" ]]; then
                 _best_time=$_ms
                 _best_domain=$_d
-                printf "  ${C_GREEN}← лучший${C_RESET}"
+                >&2 printf "  ${C_GREEN}← лучший${C_RESET}"
             fi
-            echo ""
+            >&2 echo ""
         fi
     done
-    echo ""
+    >&2 echo ""
     echo "${_best_domain:-travel.yandex.ru}"
 }
 
 _telemt_choose_domain() {
-    printf_menu_option "1" "travel.yandex.ru"
-    printf_menu_option "2" "api-maps.yandex.ru"
-    printf_menu_option "3" "ads.x5.ru"
-    printf_menu_option "4" "api.perekrestok.ru"
-    printf_menu_option "5" "1c.ru"
-    printf_menu_option "s" "🔍 Сканировать (подобрать лучший)"
-    printf_menu_option "m" "Ввести свой"
-    echo ""
+    >&2 printf_menu_option "1" "travel.yandex.ru"
+    >&2 printf_menu_option "2" "api-maps.yandex.ru"
+    >&2 printf_menu_option "3" "ads.x5.ru"
+    >&2 printf_menu_option "4" "api.perekrestok.ru"
+    >&2 printf_menu_option "5" "1c.ru"
+    >&2 printf_menu_option "s" "🔍 Сканировать (подобрать лучший)"
+    >&2 printf_menu_option "m" "Ввести свой"
+    >&2 echo ""
 
     local domain_choice
     domain_choice=$(safe_read "Выбери домен" "1") || return
