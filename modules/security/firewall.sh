@@ -213,9 +213,18 @@ _firewall_reconfigure_wizard() {
     echo ""
     info "Шаг 2: Настройка доступа"
     
-    # Определяем текущий реальный порт SSH из sshd_config
+    # Определяем текущий реальный порт SSH (проверяем все конфиги и ss)
     local current_ssh_port
-    current_ssh_port=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    # Сначала sshd_config.d (приоритетнее)
+    current_ssh_port=$(grep -h "^Port " /etc/ssh/sshd_config.d/*.conf 2>/dev/null | tail -1 | awk '{print $2}')
+    # Потом основной конфиг
+    if [[ -z "$current_ssh_port" ]]; then
+        current_ssh_port=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    fi
+    # Последний fallback — ss покажет на каком порту реально слушает sshd
+    if [[ -z "$current_ssh_port" ]]; then
+        current_ssh_port=$(ss -tlnp 2>/dev/null | grep -E "sshd|ssh" | awk '{print $4}' | grep -oE '[0-9]+$' | head -1)
+    fi
     current_ssh_port=${current_ssh_port:-22}
 
     local ssh_port
@@ -242,31 +251,59 @@ _firewall_reconfigure_wizard() {
         fi
     fi
 
-    # --- Реальная смена порта SSH в sshd_config ---
+    # --- Реальная смена порта SSH ---
     if [[ "$ssh_port" != "$current_ssh_port" ]]; then
         info "Меняю порт SSH с ${current_ssh_port} на ${ssh_port}..."
 
         local sshd_backup="/etc/ssh/sshd_config.bak_lumaxadm_$(date +%s)"
         run_cmd cp /etc/ssh/sshd_config "$sshd_backup"
 
+        # Меняем порт в основном конфиге
         run_cmd sed -i -e "s/^#*Port .*/Port $ssh_port/" /etc/ssh/sshd_config
         if ! grep -q "^Port " /etc/ssh/sshd_config; then
             echo "Port $ssh_port" | run_cmd tee -a /etc/ssh/sshd_config >/dev/null
         fi
 
-        if ! (run_cmd systemctl restart sshd 2>/dev/null || run_cmd systemctl restart ssh 2>/dev/null); then
-            warn "Не удалось перезапустить SSH! Откатываю изменения..."
-            run_cmd mv "$sshd_backup" /etc/ssh/sshd_config
-            run_cmd systemctl restart sshd 2>/dev/null || run_cmd systemctl restart ssh 2>/dev/null || true
-            err "Откат выполнен. Порт SSH не изменён."
-            return 1
+        # Также в sshd_config.d
+        if [[ -d /etc/ssh/sshd_config.d ]]; then
+            echo "Port $ssh_port" > /etc/ssh/sshd_config.d/99-lumaxadm-port.conf
         fi
 
-        sleep 2
+        # Ubuntu 24+: ssh.socket управляет портом вместо sshd_config
+        if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+            info "Обнаружен ssh.socket (Ubuntu 24+), меняю порт в systemd..."
+            run_cmd mkdir -p /etc/systemd/system/ssh.socket.d
+            cat > /etc/systemd/system/ssh.socket.d/override.conf << SOCKET_EOF
+[Socket]
+ListenStream=
+ListenStream=0.0.0.0:${ssh_port}
+ListenStream=[::]:${ssh_port}
+SOCKET_EOF
+            run_cmd systemctl daemon-reload
+            run_cmd systemctl restart ssh.socket
+            run_cmd systemctl restart ssh.service
+        else
+            # Классический способ — перезапуск sshd
+            run_cmd systemctl daemon-reload 2>/dev/null || true
+            if ! (run_cmd systemctl restart sshd 2>/dev/null || run_cmd systemctl restart ssh 2>/dev/null); then
+                warn "Не удалось перезапустить SSH! Откатываю изменения..."
+                run_cmd mv "$sshd_backup" /etc/ssh/sshd_config
+                run_cmd rm -f /etc/ssh/sshd_config.d/99-lumaxadm-port.conf 2>/dev/null
+                run_cmd systemctl restart sshd 2>/dev/null || run_cmd systemctl restart ssh 2>/dev/null || true
+                err "Откат выполнен. Порт SSH не изменён."
+                return 1
+            fi
+        fi
+
+        sleep 5
 
         if ! ss -tlnp | grep -q ":${ssh_port}"; then
             warn "SSH не слушает новый порт! Откатываю..."
             run_cmd mv "$sshd_backup" /etc/ssh/sshd_config
+            run_cmd rm -f /etc/ssh/sshd_config.d/99-lumaxadm-port.conf 2>/dev/null
+            run_cmd rm -rf /etc/systemd/system/ssh.socket.d 2>/dev/null
+            run_cmd systemctl daemon-reload 2>/dev/null || true
+            run_cmd systemctl restart ssh.socket 2>/dev/null || true
             run_cmd systemctl restart sshd 2>/dev/null || run_cmd systemctl restart ssh 2>/dev/null || true
             err "Откат выполнен. Порт SSH не изменён."
             return 1
