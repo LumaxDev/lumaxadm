@@ -16,7 +16,8 @@
 # @item( local_care | 4 | 🏓 Управление ICMP пингом | _toggle_ping | 35 | 1 | Включение или отключение ответа на ping-запросы. )
 # @item( local_care | 5 | 💨 Тест скорости | _run_speedtest | 40 | 2 | Замеряет скорость до лучшего сервера (Ookla). )
 # @item( local_care | 6 | 🧪 Multitest — все тесты сервера | _run_multitest | 50 | 2 | Комплексный тест: CPU, RAM, диск, сеть, геолокация. )
-# @item( local_care | 7 | ⚙️  Профиль нагрузки дашборда | _set_dashboard_profile_menu | 60 | 2 | Настройка частоты обновления данных на главной панели. )
+# @item( local_care | 7 | 🔍 SNI Finder | _run_sni_finder | 55 | 2 | Поиск доменов для маскировки на IP этого сервера. )
+# @item( local_care | 8 | ⚙️  Профиль нагрузки дашборда | _set_dashboard_profile_menu | 60 | 2 | Настройка частоты обновления данных на главной панели. )
 #
 
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1 # Защита от прямого запуска
@@ -327,6 +328,48 @@ _run_multitest() {
     info "Запускаю Multitest..."
     echo ""
     multitest
+    wait_for_enter
+}
+
+_run_sni_finder() {
+    clear
+    menu_header "🔍 SNI Finder — Поиск доменов"
+
+    local sni_bin="/usr/local/bin/SNI-Finder"
+
+    if [[ ! -x "$sni_bin" ]]; then
+        info "SNI Finder не установлен. Ставлю..."
+        local os arch
+        os=$(uname -s | tr 'A-Z' 'a-z')
+        arch="amd64"
+        [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
+
+        if wget -q "https://github.com/v-kamerdinerov/SNI-Finder/releases/latest/download/SNI-Finder-${os}-${arch}" -O "$sni_bin" && chmod +x "$sni_bin"; then
+            ok "SNI Finder установлен."
+        else
+            err "Не удалось скачать SNI Finder."
+            wait_for_enter
+            return 1
+        fi
+    fi
+
+    local server_ip
+    server_ip=$(curl -s --connect-timeout 3 --max-time 5 ifconfig.me 2>/dev/null)
+    [[ -z "$server_ip" ]] && server_ip=$(curl -s --connect-timeout 3 --max-time 5 api.ipify.org 2>/dev/null)
+    [[ -z "$server_ip" ]] && server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+
+    printf_description "IP сервера: ${C_CYAN}${server_ip}${C_RESET}"
+    echo ""
+
+    local target_ip
+    target_ip=$(safe_read "IP для сканирования" "$server_ip") || return
+
+    echo ""
+    info "Сканирую ${target_ip}... Это может занять время."
+    print_separator
+    echo ""
+
+    "$sni_bin" -addr "$target_ip"
     wait_for_enter
 }
 

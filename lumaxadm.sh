@@ -189,7 +189,7 @@ show_main_menu() {
                     if [ "${SKYNET_MODE:-0}" -eq 1 ]; then
                         exit 0
                     else
-                        echo "Был рад помочь. Не обосрись. 🥃"
+                        echo "Был рад помочь. Возвращайся 🥃"
                         exit 0
                     fi
                     ;;

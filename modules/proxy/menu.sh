@@ -76,6 +76,63 @@ _telemt_choose_domain() {
     esac
 }
 
+# --- SNI Finder ---
+
+readonly _SNI_FINDER_BIN="/usr/local/bin/SNI-Finder"
+
+_sni_finder_installed() {
+    [[ -f "$_SNI_FINDER_BIN" ]] && [[ -x "$_SNI_FINDER_BIN" ]]
+}
+
+_sni_finder_install() {
+    info "Устанавливаю SNI Finder..."
+    local os arch
+    os=$(uname -s | tr 'A-Z' 'a-z')
+    arch="amd64"
+    if [[ "$(uname -m)" == "aarch64" ]]; then
+        arch="arm64"
+    fi
+
+    if wget -q "https://github.com/v-kamerdinerov/SNI-Finder/releases/latest/download/SNI-Finder-${os}-${arch}" -O "$_SNI_FINDER_BIN" && chmod +x "$_SNI_FINDER_BIN"; then
+        ok "SNI Finder установлен."
+    else
+        err "Не удалось скачать SNI Finder."
+        return 1
+    fi
+}
+
+_sni_finder_run() {
+    clear
+    menu_header "🔍 SNI Finder — Поиск доменов"
+
+    if ! _sni_finder_installed; then
+        _sni_finder_install || { wait_for_enter; return; }
+    fi
+
+    # Определяем IP сервера
+    local server_ip
+    server_ip=$(curl -s --connect-timeout 3 --max-time 5 ifconfig.me 2>/dev/null)
+    if [[ -z "$server_ip" ]]; then
+        server_ip=$(curl -s --connect-timeout 3 --max-time 5 api.ipify.org 2>/dev/null)
+    fi
+    if [[ -z "$server_ip" ]]; then
+        server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    fi
+
+    printf_description "IP сервера: ${C_CYAN}${server_ip}${C_RESET}"
+    echo ""
+
+    local target_ip
+    target_ip=$(safe_read "IP для сканирования" "$server_ip") || return
+
+    echo ""
+    info "Сканирую ${target_ip}... Это может занять время."
+    print_separator
+    echo ""
+
+    "$_SNI_FINDER_BIN" -addr "$target_ip"
+}
+
 # --- Тюнинг ядра (обязательный) ---
 
 # --- Выбор шаблона сайта ---
