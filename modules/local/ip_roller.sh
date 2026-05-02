@@ -320,6 +320,183 @@ for i, vm in enumerate(data, 1):
     fi
 }
 
+# --- Смена DNS (Yandex Cloud) ---
+
+# Меняет DNS на бесплатный набор (8.8.8.8 / 8.8.4.4 / 1.1.1.1) и
+# отключает регенерацию /etc/netplan/*.yaml через cloud-init.
+# Why: дефолтный DNS Yandex Cloud — платный.
+_ipr_fix_dns() {
+    local _IPR_DNS_LIST="8.8.8.8 8.8.4.4 1.1.1.1"
+    local cloud_init_disabler="/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg"
+
+    log "Смена DNS на бесплатный (Yandex Cloud) — старт."
+    echo ""
+
+    # Гард Yandex
+    if ! _ipr_detect_yandex; then
+        warn "Этот сервер не определён как Yandex Cloud."
+        if ! ask_yes_no "Всё равно продолжить смену DNS?" "n"; then
+            info "Отмена."
+            return 0
+        fi
+    fi
+
+    # Проверка netplan
+    if [[ ! -d /etc/netplan ]]; then
+        err "Каталог /etc/netplan не найден. Не похоже на netplan-систему."
+        return 1
+    fi
+
+    local netplan_files=()
+    while IFS= read -r f; do
+        netplan_files+=("$f")
+    done < <(find /etc/netplan -maxdepth 1 -type f \( -name "*.yaml" -o -name "*.yml" \) 2>/dev/null | sort)
+
+    if [[ ${#netplan_files[@]} -eq 0 ]]; then
+        err "В /etc/netplan не найдено ни одного yaml-файла."
+        return 1
+    fi
+
+    # Выбор файла: один — берём; несколько — приоритет 50-cloud-init.yaml; иначе intеractive
+    local netplan_file=""
+    if [[ ${#netplan_files[@]} -eq 1 ]]; then
+        netplan_file="${netplan_files[0]}"
+    else
+        for f in "${netplan_files[@]}"; do
+            if [[ "$(basename "$f")" == "50-cloud-init.yaml" ]]; then
+                netplan_file="$f"
+                break
+            fi
+        done
+        if [[ -z "$netplan_file" ]]; then
+            info "Найдено несколько netplan-конфигов:"
+            local i=1
+            for f in "${netplan_files[@]}"; do
+                printf_menu_option "$i" "$f"
+                ((i++))
+            done
+            local choice
+            choice=$(ask_number_in_range "Выбери файл для правки" 1 "${#netplan_files[@]}") || return 1
+            netplan_file="${netplan_files[$((choice-1))]}"
+        fi
+    fi
+    info "Целевой netplan: ${netplan_file}"
+
+    # Идемпотентность
+    local existing_content
+    existing_content=$(run_cmd cat "$netplan_file" 2>/dev/null || echo "")
+    if [[ -f "$cloud_init_disabler" ]] \
+       && echo "$existing_content" | grep -q "8.8.8.8" \
+       && echo "$existing_content" | grep -q "8.8.4.4" \
+       && echo "$existing_content" | grep -q "1.1.1.1" \
+       && echo "$existing_content" | grep -q "use-dns: *false"; then
+        ok "DNS уже настроен (8.8.8.8 / 8.8.4.4 / 1.1.1.1) и cloud-init network отключён."
+        return 0
+    fi
+
+    # Дефолтный интерфейс и MAC
+    local iface
+    iface=$(ip route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [[ -z "$iface" ]]; then
+        err "Не удалось определить дефолтный сетевой интерфейс."
+        return 1
+    fi
+    local mac=""
+    if [[ -r "/sys/class/net/${iface}/address" ]]; then
+        mac=$(cat "/sys/class/net/${iface}/address" 2>/dev/null || echo "")
+    fi
+    info "Интерфейс: ${iface}${mac:+ (MAC: ${mac})}"
+
+    # Подтверждение
+    echo ""
+    printf_warning "Будут изменены:"
+    echo "  • ${netplan_file}"
+    echo "  • ${cloud_init_disabler}"
+    echo "  • DNS: ${_IPR_DNS_LIST// /, }"
+    echo "  • dhcp4-overrides.use-dns: false"
+    echo ""
+    if ! ask_yes_no "Применить изменения?" "n"; then
+        info "Отмена."
+        return 0
+    fi
+
+    # Backup
+    local backup_path="${netplan_file}.bak.$(date +%Y%m%d-%H%M%S)"
+    if ! run_cmd cp -a "$netplan_file" "$backup_path"; then
+        err "Не удалось создать backup ${backup_path}."
+        return 1
+    fi
+    info "Backup: ${backup_path}"
+
+    # Генерация netplan
+    local match_block=""
+    if [[ -n "$mac" ]]; then
+        match_block="      match:
+        macaddress: \"${mac}\"
+"
+    fi
+    local dns_csv
+    dns_csv=$(echo "$_IPR_DNS_LIST" | tr ' ' ',' | sed 's/,/, /g')
+
+    if ! run_cmd tee "$netplan_file" >/dev/null <<EOF
+network:
+  version: 2
+  ethernets:
+    ${iface}:
+${match_block}      dhcp4: true
+      dhcp6: false
+      nameservers:
+        addresses: [${dns_csv}]
+      dhcp4-overrides:
+        use-dns: false
+      set-name: "${iface}"
+EOF
+    then
+        err "Не удалось записать ${netplan_file}. Восстанавливаю из backup."
+        run_cmd cp -a "$backup_path" "$netplan_file" || true
+        return 1
+    fi
+    run_cmd chmod 600 "$netplan_file" || true
+    ok "Netplan-конфиг обновлён."
+
+    # Отключение cloud-init network
+    if ! run_cmd mkdir -p /etc/cloud/cloud.cfg.d; then
+        err "Не удалось создать /etc/cloud/cloud.cfg.d."
+        return 1
+    fi
+    if ! run_cmd tee "$cloud_init_disabler" >/dev/null <<EOF
+network:
+  config: disabled
+EOF
+    then
+        err "Не удалось записать ${cloud_init_disabler}."
+        return 1
+    fi
+    ok "cloud-init network config отключён."
+
+    # Применение
+    info "Применяю netplan..."
+    if ! run_cmd netplan apply; then
+        err "netplan apply упал. Восстанавливаю netplan-конфиг из backup."
+        run_cmd cp -a "$backup_path" "$netplan_file" || true
+        run_cmd netplan apply || true
+        return 1
+    fi
+    ok "DNS сменён на ${_IPR_DNS_LIST// /, }."
+    log "Смена DNS на ${_IPR_DNS_LIST// /, } для ${iface} — успех."
+
+    # Reboot
+    echo ""
+    printf_warning "Для гарантии (cloud-init может вмешаться) рекомендуется перезагрузка."
+    if ask_yes_no "Перезагрузить сервер сейчас?" "n"; then
+        log "Перезагрузка после смены DNS."
+        run_cmd reboot
+    else
+        info "Не забудь перезагрузить вручную: sudo reboot"
+    fi
+    return 0
+}
+
 # --- Меню ---
 
 show_ip_roller_menu() {
@@ -330,7 +507,8 @@ show_ip_roller_menu() {
         printf_description "Прокрутка публичного IP до попадания в whitelist операторов."
         echo ""
 
-        printf_menu_option "1" "☁️  Яндекс Облако"
+        printf_menu_option "1" "☁️  Яндекс Облако (rolling IP)"
+        printf_menu_option "2" "🌐 Сменить DNS на бесплатный (Yandex Cloud)"
         echo ""
         printf_menu_option "b" "Назад"
         echo ""
@@ -341,6 +519,10 @@ show_ip_roller_menu() {
         case "$choice" in
             1)
                 _ipr_run_yandex
+                wait_for_enter
+                ;;
+            2)
+                _ipr_fix_dns
                 wait_for_enter
                 ;;
             b|B) break ;;
