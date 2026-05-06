@@ -432,12 +432,21 @@ DESCRIPTION
     info "🎙️  ОПРОС: ввожу все параметры заранее"
     print_separator
 
+    # Robust detection: sshd_config.d > sshd_config > ss -tlnp (что реально слушает)
     local current_ssh_port
-    current_ssh_port=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    current_ssh_port=$(grep -h "^Port " /etc/ssh/sshd_config.d/*.conf 2>/dev/null | tail -1 | awk '{print $2}')
+    if [[ -z "$current_ssh_port" ]]; then
+        current_ssh_port=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    fi
+    if [[ -z "$current_ssh_port" ]]; then
+        # Последний fallback — что РЕАЛЬНО слушает sshd
+        current_ssh_port=$(ss -tlnp 2>/dev/null | grep -E "sshd|ssh" | awk '{print $4}' | grep -oE '[0-9]+$' | head -1)
+    fi
     current_ssh_port=${current_ssh_port:-22}
 
+    info "Текущий SSH порт обнаружен: ${C_CYAN}${current_ssh_port}${C_RESET}"
     local ssh_port
-    ssh_port=$(safe_read "Текущий SSH порт (или какой использовать)" "$current_ssh_port") || return
+    ssh_port=$(safe_read "На каком порту должен быть SSH (Enter = оставить как есть)" "$current_ssh_port") || return
     if ! validate_port "$ssh_port"; then
         err "Некорректный порт."; return
     fi
@@ -464,12 +473,24 @@ DESCRIPTION
     echo ""
     print_separator
     info "📝 СВОДКА:"
-    printf_description "  SSH порт:        ${C_CYAN}${ssh_port}${C_RESET}"
+    if [[ "$ssh_port" != "$current_ssh_port" ]]; then
+        printf_description "  SSH порт:        ${C_RED}${current_ssh_port} → ${ssh_port}${C_RESET} ${C_YELLOW}(будет миграция!)${C_RESET}"
+    else
+        printf_description "  SSH порт:        ${C_CYAN}${ssh_port}${C_RESET} ${C_GRAY}(без изменений)${C_RESET}"
+    fi
     printf_description "  IP Панели:       ${C_CYAN}${panel_ip}${C_RESET}"
     printf_description "  Секретный ключ:  ${C_GRAY}${secret_key:0:24}…${C_RESET}"
     printf_description "  Порт ноды:       ${C_CYAN}${node_port}${C_RESET}"
     print_separator
     echo ""
+
+    if [[ "$ssh_port" != "$current_ssh_port" ]]; then
+        warn "⚠️  Будет миграция SSH с порта ${current_ssh_port} на ${ssh_port}."
+        warn "    После миграции тебе нужно переподключиться по новому порту:"
+        warn "    ${C_CYAN}ssh -p ${ssh_port} <user>@<server>${C_RESET}"
+        warn "    Если миграция не удастся — авто-откат на ${current_ssh_port}."
+        echo ""
+    fi
 
     if ! ask_yes_no "Запускаю автоматическую настройку?" "y"; then
         info "Отмена."; return
@@ -504,10 +525,84 @@ DESCRIPTION
     fi
 
     # ============================================================
-    # 2-3. UFW reset + правила + включение
+    # 2. Миграция SSH порта (если нужна) + UFW reset + правила + включение
     # ============================================================
-    _step_start "2/10: Сброс UFW + базовая конфигурация + порты"
-    info "Сбрасываю старые правила..."
+    _step_start "2/10: Миграция SSH (если нужна) + UFW конфигурация"
+
+    # effective_ssh_port — порт, на котором SSH РЕАЛЬНО будет слушать после этого шага
+    # (если миграция удалась — это $ssh_port, иначе остаётся $current_ssh_port)
+    local effective_ssh_port="$current_ssh_port"
+
+    if [[ "$ssh_port" != "$current_ssh_port" ]]; then
+        info "🔄 Мигрирую SSH с ${current_ssh_port} на ${ssh_port}..."
+        local sshd_backup="/etc/ssh/sshd_config.bak_lumaxadm_$(date +%s)"
+        run_cmd cp /etc/ssh/sshd_config "$sshd_backup"
+
+        # 1. Меняем порт в основном конфиге
+        run_cmd sed -i -e "s/^#*Port .*/Port $ssh_port/" /etc/ssh/sshd_config
+        if ! grep -q "^Port " /etc/ssh/sshd_config; then
+            echo "Port $ssh_port" | run_cmd tee -a /etc/ssh/sshd_config >/dev/null
+        fi
+
+        # 2. И в sshd_config.d (приоритет на современных системах)
+        if [[ -d /etc/ssh/sshd_config.d ]]; then
+            echo "Port $ssh_port" | run_cmd tee /etc/ssh/sshd_config.d/99-lumaxadm-port.conf >/dev/null
+        fi
+
+        # 3. Ubuntu 24+ — ssh.socket рулит портом
+        local migration_ok=0
+        if systemctl is-active --quiet ssh.socket 2>/dev/null; then
+            info "Обнаружен ssh.socket (Ubuntu 24+), правлю systemd unit..."
+            run_cmd mkdir -p /etc/systemd/system/ssh.socket.d
+            cat <<SOCKET_EOF | run_cmd tee /etc/systemd/system/ssh.socket.d/override.conf >/dev/null
+[Socket]
+ListenStream=
+ListenStream=0.0.0.0:${ssh_port}
+ListenStream=[::]:${ssh_port}
+SOCKET_EOF
+            run_cmd systemctl daemon-reload
+            if run_cmd systemctl restart ssh.socket && run_cmd systemctl restart ssh.service; then
+                migration_ok=1
+            fi
+        else
+            run_cmd systemctl daemon-reload 2>/dev/null || true
+            if run_cmd systemctl restart sshd 2>/dev/null || run_cmd systemctl restart ssh 2>/dev/null; then
+                migration_ok=1
+            fi
+        fi
+
+        if [[ $migration_ok -eq 1 ]]; then
+            sleep 5
+            # Проверяем по факту: реально слушает новый порт?
+            if ss -tlnp 2>/dev/null | grep -q ":${ssh_port}"; then
+                ok "✅ SSH теперь слушает порт ${ssh_port}."
+                effective_ssh_port="$ssh_port"
+            else
+                migration_ok=0
+                warn "SSH перезапустился, но не слушает ${ssh_port}. Откатываю..."
+            fi
+        fi
+
+        if [[ $migration_ok -eq 0 ]]; then
+            warn "❌ Миграция SSH не удалась. Откатываю на ${current_ssh_port}..."
+            run_cmd mv "$sshd_backup" /etc/ssh/sshd_config
+            run_cmd rm -f /etc/ssh/sshd_config.d/99-lumaxadm-port.conf 2>/dev/null
+            run_cmd rm -rf /etc/systemd/system/ssh.socket.d 2>/dev/null
+            run_cmd systemctl daemon-reload 2>/dev/null || true
+            run_cmd systemctl restart ssh.socket 2>/dev/null || true
+            run_cmd systemctl restart sshd 2>/dev/null || run_cmd systemctl restart ssh 2>/dev/null || true
+            warn "Использую старый порт ${current_ssh_port} для UFW (SSH не тронут)."
+            effective_ssh_port="$current_ssh_port"
+            _SETUP_FAIL+=("2/10: SSH миграция (откат, продолжаю на старом порту)")
+        fi
+
+        # Сохраняем порт в conf
+        set_config_var "SSH_PORT" "$effective_ssh_port" 2>/dev/null || true
+    else
+        ok "SSH остаётся на порту ${current_ssh_port}."
+    fi
+
+    info "Сбрасываю старые правила UFW..."
     run_cmd ufw --force reset >/dev/null
     info "Default политики: deny incoming, allow outgoing..."
     run_cmd ufw default deny incoming >/dev/null
@@ -515,8 +610,8 @@ DESCRIPTION
     if [[ -f "/etc/default/ufw" ]] && grep -q "^IPV6=yes" "/etc/default/ufw"; then
         run_cmd sed -i 's/^IPV6=yes/IPV6=no/' "/etc/default/ufw"
     fi
-    info "Открываю SSH=${ssh_port}, Panel=${panel_ip}, 443/tcp+udp, 8443/tcp+udp..."
-    run_cmd ufw allow "${ssh_port}"/tcp comment 'SSH' >/dev/null
+    info "Открываю SSH=${effective_ssh_port}, Panel=${panel_ip}, 443/tcp+udp, 8443/tcp+udp..."
+    run_cmd ufw allow "${effective_ssh_port}"/tcp comment 'SSH' >/dev/null
     run_cmd ufw allow from "$panel_ip" comment 'Panel Full Access' >/dev/null
     run_cmd ufw allow 443/tcp comment 'VPN/HTTPS' >/dev/null
     run_cmd ufw allow 443/udp comment 'VPN/HTTP3' >/dev/null
@@ -524,7 +619,7 @@ DESCRIPTION
     run_cmd ufw allow 8443/udp comment 'VPN ALT UDP' >/dev/null
     info "Включаю UFW..."
     if echo "y" | run_cmd ufw enable >/dev/null 2>&1; then
-        ok "UFW активирован."
+        ok "UFW активирован, SSH доступен на порту ${effective_ssh_port}."
         _step_ok "2/10"
     else
         _step_fail "2/10: ufw enable"
@@ -548,7 +643,7 @@ DESCRIPTION
             f2b_logpath="SYSLOG"
             f2b_backend="systemd"
         fi
-        info "Создаю /etc/fail2ban/jail.local (bantime=1ч, maxretry=5, findtime=600с)..."
+        info "Создаю /etc/fail2ban/jail.local (bantime=1ч, maxretry=5, findtime=600с, port=${effective_ssh_port})..."
         run_cmd tee /etc/fail2ban/jail.local > /dev/null <<JAIL
 [DEFAULT]
 bantime = 3600
@@ -559,7 +654,7 @@ ignoreip = 127.0.0.1/8 ::1
 
 [sshd]
 enabled = true
-port = $ssh_port
+port = $effective_ssh_port
 filter = sshd
 logpath = $f2b_logpath
 JAIL
@@ -567,7 +662,7 @@ JAIL
         run_cmd systemctl restart fail2ban
         sleep 1
         if systemctl is-active --quiet fail2ban; then
-            ok "Fail2Ban запущен и защищает порт ${ssh_port}."
+            ok "Fail2Ban запущен и защищает порт ${effective_ssh_port}."
             _step_ok "3/10"
         else
             _step_fail "3/10: fail2ban service не стартовал"
@@ -747,25 +842,51 @@ EOF_NO6
     info "Скачиваю установщик ноды (Dignezzz)..."
     curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh -o /tmp/_lumaxadm_rn.sh
 
-    info "Запускаю установщик. После 'docker compose up' он стримит логи контейнера —"
-    info "у тебя 2 минуты. Если за это время нода поднимется, мы продолжим автоматом."
-    # timeout 120: установщик от Dignezzz после docker compose up может стримить логи бесконечно.
-    # Контейнер запускается через 'docker compose up -d' (detached), поэтому убийство
-    # foreground-bash не остановит ноду. </dev/null закрывает stdin от любых интерактивных prompts.
-    timeout 120 bash /tmp/_lumaxadm_rn.sh @ install --force --secret-key="$secret_key" --port="$node_port" </dev/null
-    local install_rc=$?
-    rm -f /tmp/_lumaxadm_rn.sh
+    info "Запускаю установщик. Жму отбой автоматически как только контейнер поднимется."
+    info "Можешь нажать Ctrl+C если надоест ждать (нода уже в detached режиме)."
 
-    # Успех определяем НЕ по exit code (там может быть 124 = timeout, 130 = SIGINT),
-    # а по реальному состоянию: запущен ли контейнер remnanode.
-    sleep 3
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^remnanode"; then
-        ok "Контейнер remnanode запущен (install_rc=${install_rc})."
-        local node_running=1
-    else
-        warn "Контейнер remnanode не обнаружен (install_rc=${install_rc})."
-        local node_running=0
+    # Установщик от Dignezzz после 'docker compose up -d' стримит логи на foreground.
+    # Запускаем в фоне, поллим docker ps — как только контейнер remnanode появится,
+    # убиваем foreground (контейнер останется работать, он detached).
+    # Hard timeout 180s = страховка если что-то совсем пошло не так.
+    bash /tmp/_lumaxadm_rn.sh @ install --force --secret-key="$secret_key" --port="$node_port" </dev/null &
+    local install_pid=$!
+
+    local waited=0
+    local node_running=0
+    local POLL_INTERVAL=3
+    local POLL_MAX=180  # 3 минуты hard cap
+    while [[ $waited -lt $POLL_MAX ]]; do
+        # Если установщик сам завершился (нормально или с ошибкой) — выходим из поллинга
+        if ! kill -0 "$install_pid" 2>/dev/null; then
+            break
+        fi
+        sleep "$POLL_INTERVAL"
+        waited=$((waited + POLL_INTERVAL))
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^remnanode"; then
+            ok "Контейнер remnanode поднят за ${waited}с, продолжаю авто-настройку..."
+            kill -TERM "$install_pid" 2>/dev/null
+            sleep 1
+            kill -KILL "$install_pid" 2>/dev/null
+            wait "$install_pid" 2>/dev/null
+            node_running=1
+            break
+        fi
+    done
+
+    # Если поллинг закончился без поднятия контейнера — добиваем установщик и проверяем последний раз
+    if [[ $node_running -eq 0 ]]; then
+        kill -TERM "$install_pid" 2>/dev/null
+        wait "$install_pid" 2>/dev/null
+        sleep 2
+        if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^remnanode"; then
+            ok "Контейнер remnanode подъехал к финишу, идём дальше."
+            node_running=1
+        else
+            warn "Контейнер remnanode не обнаружен после ${waited}с ожидания."
+        fi
     fi
+    rm -f /tmp/_lumaxadm_rn.sh
 
     # Ротация логов — выполняется НЕЗАВИСИМО от install_rc, если есть compose-файл.
     # Так setup логов не пропускается даже если установщик «завис на логах».
