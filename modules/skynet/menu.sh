@@ -27,6 +27,7 @@
 # @item( skynet_server_security | 4 | 🔨 Настроить Fail2Ban | _sss_setup_f2b | 50 | 3 | Устанавливает и настраивает Fail2Ban. )
 # @item( skynet_server_security | 5 | 🧠 Применить настройки ядра | _sss_apply_kernel | 60 | 4 | Применяет безопасные sysctl-настройки. )
 # @item( skynet_server_security | 6 | 🔔 Уведомления о входе | _sss_setup_login_notify | 70 | 4 | Настраивает уведомления в Telegram о SSH-входе. )
+# @item( skynet_server_security | r | 🔄 Сброс безопасности (Rollback) | _sss_rollback_security | 90 | 9 | Откатывает SSH к паролям, опционально гасит UFW/F2B. Спасательный круг при потере доступа. )
 #
 
 [[ "${BASH_SOURCE[0]}" == "${0}" ]] && exit 1
@@ -50,12 +51,17 @@ _skynet_add_server_wizard() {
     echo
     printf_info "--- НОВЫЙ БОЕЦ ---"
     local s_name; s_name=$(ask_non_empty "Имя сервера: ") || return
+    s_name="${s_name//|/}"
     local s_ip; s_ip=$(ask_non_empty "IP адрес: ") || return
+    s_ip="${s_ip//|/}"
     local s_user; s_user=$(safe_read "Пользователь: " "$SKYNET_DEFAULT_USER")
+    s_user="${s_user//|/}"
     local s_port; s_port=$(safe_read "SSH порт: " "$SKYNET_DEFAULT_PORT")
+    s_port="${s_port//|/}"
     local s_pass=""
     if [[ "$s_user" != "root" ]]; then
         s_pass=$(ask_password "Пароль sudo (или Enter): ")
+        s_pass="${s_pass//|/}"
     fi
 
     echo
@@ -138,16 +144,16 @@ _skynet_add_server_wizard() {
         printf_ok "Сервер '${s_name}' добавлен в флот."
         
         # Проверяем соединение и предлагаем усилить безопасность
-        if ssh -q -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "echo OK" &>/dev/null; then
+        if ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "echo OK" &>/dev/null; then
             printf_ok "Тестовое подключение по ключу прошло успешно."
             if ask_yes_no "Вырубаем вход по паролю и оставляем только ключи? (y/n)"; then
                 local harden_cmd="sed -i.bak -E 's/^#?PasswordAuthentication\s+.*/PasswordAuthentication no/' /etc/ssh/sshd_config && (systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null || service sshd restart 2>/dev/null || service ssh restart 2>/dev/null)"
                 if [[ "$s_user" == "root" ]]; then
-                    ssh -t -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "$harden_cmd"
+                    ssh -t -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "$harden_cmd"
                     stty sane
                 else
                     if [[ -n "$s_pass" ]]; then
-                        ssh -t -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "echo '$s_pass' | sudo -S -p '' bash -c '$harden_cmd'"
+                        ssh -t -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "$final_key" -p "$s_port" "${s_user}@${s_ip}" "echo '$s_pass' | sudo -S -p '' bash -c '$harden_cmd'"
                         stty sane
                     else
                         printf_warning "Пароль sudo не указан."
@@ -212,7 +218,7 @@ show_fleet_menu() {
                     # Лечим ключ хоста перед проверкой
                     _skynet_heal_host_key "$ip" "$port"
                     # Запускаем в фоне и сохраняем PID
-                    ( timeout 3 ssh -n -q -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -i "$key" -p "$port" "$user@$ip" exit &>/dev/null && echo "ON" > "$tmp_dir/$i" || echo "OFF" > "$tmp_dir/$i" ) &
+                    ( timeout 3 ssh -n -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -i "$key" -p "$port" "$user@$ip" exit &>/dev/null && echo "ON" > "$tmp_dir/$i" || echo "OFF" > "$tmp_dir/$i" ) &
                     pids+=($!)
                 fi
                 ((i++))
@@ -283,10 +289,10 @@ _show_server_management_menu() {
         printf_info "🚀 SKYNET UPLINK: Подключаюсь к ${s_name}..."
 
         # Проверяем, работает ли вход по ключу. Если нет - предлагаем закинуть ключ.
-        if ! ssh -q -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i "$s_key" -p "$s_port" "${s_user}@${s_ip}" exit; then
+        if ! ssh -q -F /dev/null -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i "$s_key" -p "$s_port" "${s_user}@${s_ip}" exit; then
             printf_warning "Не удалось войти по ключу. Возможно, сервер был переустановлен."
             if ask_yes_no "Хочешь закинуть ключ на сервер сейчас (потребуется пароль)?"; then
-                if ! ssh-copy-id -o StrictHostKeyChecking=no -i "${s_key}.pub" -p "$s_port" "${s_user}@${s_ip}"; then
+                if ! ssh-copy-id -f -o StrictHostKeyChecking=no -i "${s_key}.pub" -p "$s_port" "${s_user}@${s_ip}"; then
                     err "Не удалось установить ключ. Проверь пароль или доступность SSH."
                     wait_for_enter
                     return
@@ -309,9 +315,9 @@ _show_server_management_menu() {
         run_remote() {
             local cmd_to_run="$1"
             if [[ "$s_user" == "root" ]]; then
-                ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "$s_key" -p "$s_port" "$s_user@$s_ip" "$cmd_to_run"
+                ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "$s_key" -p "$s_port" "$s_user@$s_ip" "$cmd_to_run"
             else
-                ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "$s_key" -p "$s_port" "$s_user@$s_ip" "echo '$s_pass' | sudo -S -p '' bash -c '$cmd_to_run'"
+                ssh -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "$s_key" -p "$s_port" "$s_user@$s_ip" "echo '$s_pass' | sudo -S -p '' bash -c '$cmd_to_run'"
             fi
         }
 
@@ -330,7 +336,7 @@ _show_server_management_menu() {
         fi
         
         printf_info "Вхожу в удалённый терминал..."
-        local ssh_opts=(-t -o StrictHostKeyChecking=no -i "$s_key" -p "$s_port")
+        local ssh_opts=(-t -F /dev/null -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -i "$s_key" -p "$s_port")
         local remote_target="${s_user}@${s_ip}"
         # Исполняем команду через 'bash -l -c' и по абсолютному пути, чтобы гарантировать корректный $PATH
         local remote_exec_command="bash -l -c 'SKYNET_MODE=1 /opt/lumaxadm/lumaxadm.sh'"
@@ -347,8 +353,19 @@ _show_server_management_menu() {
     }
     _sm_security() { _show_server_security_menu "$server_idx" "$server_data"; }
     _sm_edit() {
-        info "Редактирование: ${s_name}"; local n; n=$(safe_read "Имя" "$s_name")||return; local u; u=$(safe_read "Пользователь" "$s_user")||return; local i; i=$(safe_read "IP" "$s_ip")||return; local p; p=$(safe_read "Порт" "$s_port")||return; local k; k=$(safe_read "Ключ" "$s_key")||return; local pw; pw=$(ask_password "Пароль sudo (Enter, чтобы оставить):"); if [[ -z "$pw" ]]; then pw=$s_pass; fi
-        server_data="${n}|${u}|${i}|${p}|${k}|${pw}"; _update_fleet_record "$server_idx" "$server_data"; s_name=$n; s_user=$u; s_ip=$i; s_port=$p; s_key=$k; s_pass=$pw; ok "Запись обновлена."; wait_for_enter
+        info "Редактирование: ${s_name}"
+        local n; n=$(safe_read "Имя" "$s_name") || return; n="${n//|/}"
+        local u; u=$(safe_read "Пользователь" "$s_user") || return; u="${u//|/}"
+        local i; i=$(safe_read "IP" "$s_ip") || return; i="${i//|/}"
+        local p; p=$(safe_read "Порт" "$s_port") || return; p="${p//|/}"
+        local k; k=$(safe_read "Ключ" "$s_key") || return; k="${k//|/}"
+        local pw; pw=$(ask_password "Пароль sudo (Enter, чтобы оставить):")
+        if [[ -z "$pw" ]]; then pw=$s_pass; else pw="${pw//|/}"; fi
+        server_data="${n}|${u}|${i}|${p}|${k}|${pw}"
+        _update_fleet_record "$server_idx" "$server_data"
+        s_name=$n; s_user=$u; s_ip=$i; s_port=$p; s_key=$k; s_pass=$pw
+        ok "Запись обновлена."
+        wait_for_enter
     }
     _sm_delete() { 
         if ask_yes_no "Удалить сервер '${s_name}'?" "n"; then 
@@ -398,27 +415,76 @@ _show_server_security_menu() {
     local s_name s_user s_ip s_port s_key s_pass
     IFS='|' read -r s_name s_user s_ip s_port s_key s_pass <<< "$server_data"
 
+    local _PLUGINS_BASE="${SCRIPT_DIR}/plugins/skynet_commands/security"
+
+    # --- Хелпер: проброс Глобального Белого Списка на ноду через base64 в env ---
+    _sss_get_gwl_env() {
+        local gwl_file="/etc/lumaxadm/global-whitelist.txt"
+        local env_str="TARGET_SSH_PORT=$s_port"
+        if [[ -f "$gwl_file" ]]; then
+            local b64_content
+            b64_content=$(base64 -w0 "$gwl_file" 2>/dev/null || base64 "$gwl_file" | tr -d '\n' || echo "")
+            if [[ -n "$b64_content" ]]; then
+                env_str="${env_str} GWL_B64=${b64_content}"
+            fi
+        fi
+        echo "$env_str"
+    }
+
     # --- Внутренние функции-действия ---
     _sss_get_status() {
-        _skynet_run_plugin_on_server "security/00_get_security_status.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+        _skynet_run_plugin_on_server "${_PLUGINS_BASE}/00_get_security_status.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
     }
     _sss_harden_ssh() {
-        _skynet_run_plugin_on_server "security/01_harden_ssh.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+        local env; env=$(_sss_get_gwl_env)
+        _skynet_run_plugin_on_server_with_env "${_PLUGINS_BASE}/01_harden_ssh.sh" "$env" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
     }
     _sss_change_port() {
-        _skynet_run_plugin_on_server "security/02_change_ssh_port.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+        local new_port
+        new_port=$(ask_number_in_range "Введи новый порт SSH: " 1024 65535 "2222") || return
+        if [[ "$new_port" == "$s_port" ]]; then
+            warn "Новый порт совпадает с текущим. Отмена."
+            return
+        fi
+        local env; env=$(_sss_get_gwl_env)
+        env="${env} OLD_SSH_PORT=$s_port NEW_SSH_PORT=$new_port"
+        if _skynet_run_plugin_on_server_with_env "${_PLUGINS_BASE}/02_change_ssh_port.sh" "$env" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"; then
+            ok "Порт успешно изменён на стороне сервера. Обновляю базу Skynet..."
+            s_port=$new_port
+            local new_server_data="${s_name}|${s_user}|${s_ip}|${s_port}|${s_key}|${s_pass}"
+            _update_fleet_record "$server_idx" "$new_server_data"
+            ok "База данных обновлена. Новый порт: $s_port"
+        else
+            err "Не удалось изменить порт или произошёл откат. БД не тронута."
+        fi
     }
     _sss_setup_ufw() {
-        _skynet_run_plugin_on_server "security/03_setup_ufw.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+        local env; env=$(_sss_get_gwl_env)
+        _skynet_run_plugin_on_server_with_env "${_PLUGINS_BASE}/03_setup_ufw.sh" "$env" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
     }
     _sss_setup_f2b() {
-        _skynet_run_plugin_on_server "security/04_setup_fail2ban.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+        local env; env=$(_sss_get_gwl_env)
+        _skynet_run_plugin_on_server_with_env "${_PLUGINS_BASE}/04_setup_fail2ban.sh" "$env" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
     }
     _sss_apply_kernel() {
-        _skynet_run_plugin_on_server "security/05_apply_kernel.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+        _skynet_run_plugin_on_server "${_PLUGINS_BASE}/05_apply_kernel.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
     }
     _sss_setup_login_notify() {
-        _skynet_run_plugin_on_server "security/06_setup_ssh_login_notify.sh" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+        local env; env=$(_sss_get_gwl_env)
+        _skynet_run_plugin_on_server_with_env "${_PLUGINS_BASE}/06_setup_ssh_login_notify.sh" "$env" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
+    }
+    _sss_rollback_security() {
+        warn "☢️  ВНИМАНИЕ! Это действие ослабит защиту сервера!"
+        printf_info "Будет включён вход по паролю и разрешён вход root."
+        if ! ask_yes_no "Точно откатываем? (y/n): " "n"; then
+            info "Отмена."; return
+        fi
+
+        local extra_env=""
+        if ask_yes_no "Выключить также Firewall (UFW)? (y/n): " "n"; then extra_env="DISABLE_UFW=true"; fi
+        if ask_yes_no "Выключить также Fail2Ban? (y/n): " "n"; then extra_env="${extra_env} DISABLE_F2B=true"; fi
+
+        _skynet_run_plugin_on_server_with_env "${_PLUGINS_BASE}/99_rollback_security.sh" "$extra_env" "$s_name" "$s_user" "$s_ip" "$s_port" "$s_key" "$s_pass"
     }
     # --- Конец внутренних функций ---
 
@@ -445,8 +511,11 @@ _show_server_security_menu() {
         action=$(get_menu_action "skynet_server_security" "$choice")
 
         if [[ -n "$action" ]]; then
-            # Выполняем локальную функцию (_sss_... ), которая уже знает о сервере
-            "$action"
+            # action возвращается парсером как "run_module skynet/menu _sss_get_status"
+            # Нам нужна только сама локальная функция (_sss_...), которая определена
+            # внутри _show_server_security_menu и знает о сервере через замыкание.
+            local func_name="${action##* }"
+            "$func_name"
             wait_for_enter
         else
             warn "Неверный выбор"

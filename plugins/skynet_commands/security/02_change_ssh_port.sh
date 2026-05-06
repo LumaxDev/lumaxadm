@@ -31,15 +31,24 @@ fi
 
 # --- Основная логика ---
 SSH_CONFIG_FILE="/etc/ssh/sshd_config"
+JAIL_CONFIG="/etc/fail2ban/jail.local"
 info "Меняю порт SSH с $OLD_SSH_PORT на $NEW_SSH_PORT..."
 
 # --- Шаг 1: Открываем новый порт в Firewall ---
 if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
     info "Открываю порт $NEW_SSH_PORT в UFW..."
-    ufw allow "$NEW_SSH_PORT"/tcp >/dev/null
+    ufw allow "$NEW_SSH_PORT"/tcp comment 'SSH New Port' >/dev/null
+    # Старый пока не закрываем — это спасательный круг!
 fi
 
-# --- Шаг 2: Меняем порт в sshd_config ---
+# --- Шаг 2: Синхронизация Fail2Ban (если установлен) ---
+if [[ -f "$JAIL_CONFIG" ]]; then
+    info "Обновляю порт в Fail2Ban (jail.local)..."
+    sed -i "s/^port = .*/port = $NEW_SSH_PORT/" "$JAIL_CONFIG"
+    systemctl restart fail2ban || true
+fi
+
+# --- Шаг 3: Меняем порт в sshd_config ---
 info "Обновляю $SSH_CONFIG_FILE..."
 backup_file="${SSH_CONFIG_FILE}.bak_$(date +%s)"
 cp "$SSH_CONFIG_FILE" "$backup_file"
@@ -49,7 +58,7 @@ if ! grep -q "^Port " "$SSH_CONFIG_FILE"; then
     echo "Port $NEW_SSH_PORT" >> "$SSH_CONFIG_FILE"
 fi
 
-# --- Шаг 3: Перезапуск и проверка ---
+# --- Шаг 4: Перезапуск и проверка ---
 info "Перезапускаю сервис SSH..."
 if ! (systemctl restart sshd || systemctl restart ssh); then
     warn "ОШИБКА: Не удалось перезапустить сервис SSH. Откатываю изменения..."

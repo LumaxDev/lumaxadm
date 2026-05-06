@@ -10,24 +10,50 @@
 
 # Выполнить выбранный плагин Skynet на одном сервере
 _skynet_run_plugin_on_server() {
-    local plugin="$1" name="$2" user="$3" ip="$4" port="$5" key_path="$6"
+    local plugin="$1" name="$2" user="$3" ip="$4" port="$5" key_path="$6" sudo_pass="${7:-}"
     printf "\n"; warn "--- Сервер: $name ---"
     # Лечим ключ хоста на случай, если сервер был переустановлен
     _skynet_heal_host_key "$ip" "$port"
+
+    local scp_opts=(-q -P "$port" -F /dev/null -o IdentitiesOnly=yes -i "$key_path" -o StrictHostKeyChecking=no -o ConnectTimeout=10)
+    local ssh_opts=(-t -p "$port" -F /dev/null -o IdentitiesOnly=yes -i "$key_path" -o StrictHostKeyChecking=no -o ConnectTimeout=10)
+
     # Копируем плагин на удалённую машину, выполняем через bash (не требуем +x) и удаляем
-    scp -q -P "$port" -i "$key_path" -o StrictHostKeyChecking=no "$plugin" "${user}@${ip}:/tmp/lumaxadm_plugin.sh"
-    ssh -t -p "$port" -i "$key_path" -o StrictHostKeyChecking=no "${user}@${ip}" "bash /tmp/lumaxadm_plugin.sh; rm -f /tmp/lumaxadm_plugin.sh"
+    if ! scp "${scp_opts[@]}" "$plugin" "${user}@${ip}:/tmp/lumaxadm_plugin.sh"; then
+        err "Не удалось скопировать плагин на $name (timeout/access)."
+        return 1
+    fi
+
+    local run_cmd="bash /tmp/lumaxadm_plugin.sh; rm -f /tmp/lumaxadm_plugin.sh"
+    if [[ "$user" != "root" && -n "$sudo_pass" ]]; then
+        run_cmd="echo '$sudo_pass' | sudo -S -p '' bash -c '$run_cmd'"
+    fi
+
+    ssh "${ssh_opts[@]}" "${user}@${ip}" "$run_cmd"
 }
 
 # Запуск плагина Skynet на ОДНОМ сервере с дополнительными переменными окружения
 _skynet_run_plugin_on_server_with_env() {
-    local plugin="$1" env_vars="$2" name="$3" user="$4" ip="$5" port="$6" key_path="$7"
+    local plugin="$1" env_vars="$2" name="$3" user="$4" ip="$5" port="$6" key_path="$7" sudo_pass="${8:-}"
     printf "\n"; warn "--- Сервер: $name ---"
     # Лечим ключ хоста на случай, если сервер был переустановлен
     _skynet_heal_host_key "$ip" "$port"
-    scp -q -P "$port" -i "$key_path" -o StrictHostKeyChecking=no "$plugin" "${user}@${ip}:/tmp/lumaxadm_plugin.sh"
+
+    local scp_opts=(-q -P "$port" -F /dev/null -o IdentitiesOnly=yes -i "$key_path" -o StrictHostKeyChecking=no -o ConnectTimeout=10)
+    local ssh_opts=(-t -p "$port" -F /dev/null -o IdentitiesOnly=yes -i "$key_path" -o StrictHostKeyChecking=no -o ConnectTimeout=10)
+
+    if ! scp "${scp_opts[@]}" "$plugin" "${user}@${ip}:/tmp/lumaxadm_plugin.sh"; then
+        err "Не удалось скопировать плагин на $name (timeout/access)."
+        return 1
+    fi
+
     # env_vars – это строка наподобие "VAR1=val1 VAR2=val2"
-    ssh -t -p "$port" -i "$key_path" -o StrictHostKeyChecking=no "${user}@${ip}" "${env_vars} bash /tmp/lumaxadm_plugin.sh; rm -f /tmp/lumaxadm_plugin.sh"
+    local run_cmd="${env_vars} bash /tmp/lumaxadm_plugin.sh; rm -f /tmp/lumaxadm_plugin.sh"
+    if [[ "$user" != "root" && -n "$sudo_pass" ]]; then
+        run_cmd="echo '$sudo_pass' | sudo -S -p '' bash -c '$run_cmd'"
+    fi
+
+    ssh "${ssh_opts[@]}" "${user}@${ip}" "$run_cmd"
 }
 
 # Запуск плагина Skynet для захвата вывода (без TTY и без лишних сообщений)
@@ -42,14 +68,14 @@ _skynet_run_plugin_for_capture() {
     local temp_plugin_path="/tmp/lumaxadm_plugin_$$_${RANDOM}"
 
     # Копируем плагин
-    if ! scp -q -P "$port" -i "$key_path" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes "$plugin" "${user}@${ip}:${temp_plugin_path}" 2>/dev/null; then
+    if ! scp -q -P "$port" -F /dev/null -o IdentitiesOnly=yes -i "$key_path" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes "$plugin" "${user}@${ip}:${temp_plugin_path}" 2>/dev/null; then
         # Не выводим ошибку, просто возвращаем пустоту, т.к. это может быть простая недоступность хоста
         return 1
     fi
-    
+
     # Выполняем и захватываем вывод. Без -t для чистого вывода.
     local output
-    output=$(ssh -p "$port" -i "$key_path" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes "${user}@${ip}" "${env_vars} bash ${temp_plugin_path}; rm -f ${temp_plugin_path}" 2>/dev/null)
+    output=$(ssh -p "$port" -F /dev/null -o IdentitiesOnly=yes -i "$key_path" -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes "${user}@${ip}" "${env_vars} bash ${temp_plugin_path}; rm -f ${temp_plugin_path}" 2>/dev/null)
     
     echo "$output"
 }

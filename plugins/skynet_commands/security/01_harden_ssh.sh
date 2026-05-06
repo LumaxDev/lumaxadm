@@ -44,7 +44,7 @@ declare -A ssh_settings=(
     ["UsePAM"]="yes"
     ["X11Forwarding"]="no"
     ["PermitEmptyPasswords"]="no"
-    ["MaxAuthTries"]="3"
+    ["MaxAuthTries"]="6"
 )
 
 for key in "${!ssh_settings[@]}"; do
@@ -68,10 +68,23 @@ if ! (systemctl restart sshd || systemctl restart ssh); then
 fi
 ok "Сервис SSH успешно перезапущен."
 
-# Open port in UFW if active
+# --- СИНХРОНИЗАЦИЯ С ГЛОБАЛЬНЫМ БЕЛЫМ СПИСКОМ ---
 if command -v ufw &>/dev/null && ufw status | grep -q "active"; then
-    info "Открываю порт $TARGET_PORT в UFW..."
-    ufw allow "$TARGET_PORT"/tcp >/dev/null
+    info "Синхронизирую доступ через UFW..."
+    ufw allow "$TARGET_PORT"/tcp comment 'SSH' >/dev/null
+
+    if [[ -n "${GWL_B64:-}" ]]; then
+        temp_gwl=$(mktemp)
+        echo "$GWL_B64" | base64 -d > "$temp_gwl" 2>/dev/null || true
+        if [[ -s "$temp_gwl" ]]; then
+            ips=$(grep -v '^\s*#' "$temp_gwl" | grep -v '^\s*$' | awk '{print $1}')
+            for ip in $ips; do
+                ufw allow from "$ip" comment 'GWL Trusted' >/dev/null
+            done
+            ok "Доверенные IP из Глобального списка добавлены в UFW."
+        fi
+        rm -f "$temp_gwl"
+    fi
 fi
 
 ok "Усиление защиты SSH успешно применено."

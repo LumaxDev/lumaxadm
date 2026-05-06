@@ -16,7 +16,7 @@ fi
 # --- Цвета для вывода в терминал ---
 C_RESET='\033[0m'; C_RED='\033[0;31m'; C_GREEN='\033[0;32m';
 C_YELLOW='\033[1;33m'; C_CYAN='\033[0;36m'; C_BLUE='\033[0;94m'; C_BOLD='\033[1m';
-C_GRAY='\033[0;90m'; C_WHITE='\033[1;37m';
+C_GRAY='\033[0;90m'; C_WHITE='\033[1;37m'; C_MAGENTA='\033[0;35m';
 
 # Универсальный хедер для меню
 menu_header() {
@@ -382,17 +382,85 @@ ask_selection() {
     return 0
 }
 
-# Функция проверки IP адреса
+# Функция проверки IP адреса (IPv4 + IPv6)
 validate_ip() {
     local ip="$1"
+    # Проверка IPv4
     if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
         local IFS=.
         local -a octets=($ip)
         for octet in "${octets[@]}"; do
+            [[ $octet =~ ^0[0-9]+ ]] && return 1 # Запрет ведущих нулей (01.02.03.04)
             if ((octet > 255)); then
                 return 1
             fi
         done
+        return 0
+    fi
+    # Проверка IPv6 (упрощённая)
+    if [[ $ip =~ ^([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Валидация IP или CIDR (IPv4)
+validate_ip_or_cidr() {
+    local addr="$1"
+    if validate_ip "$addr"; then return 0; fi
+    if [[ "$addr" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/[0-9]{1,2}$ ]]; then
+        local ip_part="${addr%/*}"
+        local mask="${addr#*/}"
+        if validate_ip "$ip_part" && [[ "$mask" -ge 0 ]] && [[ "$mask" -le 32 ]]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Функция автоматического поиска лог-файлов
+find_log_file() {
+    local log_name="$1"
+    case "$log_name" in
+        ufw)
+            if [[ -f "/var/log/ufw.log" ]]; then echo "/var/log/ufw.log"
+            elif [[ -f "/var/log/kern.log" ]]; then echo "/var/log/kern.log"
+            elif [[ -f "/var/log/syslog" ]]; then echo "/var/log/syslog"
+            else journalctl -t ufw | tail -n 100 > /tmp/lumaxadm_ufw.log; echo "/tmp/lumaxadm_ufw.log"
+            fi
+            ;;
+        auth)
+            if [[ -f "/var/log/auth.log" ]]; then echo "/var/log/auth.log"
+            elif [[ -f "/var/log/secure" ]]; then echo "/var/log/secure"
+            else journalctl -t sshd | tail -n 100 > /tmp/lumaxadm_auth.log; echo "/tmp/lumaxadm_auth.log"
+            fi
+            ;;
+        kernel)
+            if [[ -f "/var/log/kern.log" ]]; then echo "/var/log/kern.log"
+            elif [[ -f "/var/log/syslog" ]]; then echo "/var/log/syslog"
+            else dmesg | tail -n 100 > /tmp/lumaxadm_kern.log; echo "/tmp/lumaxadm_kern.log"
+            fi
+            ;;
+    esac
+}
+
+# ============================================================ #
+# ==      ГЛОБАЛЬНЫЙ БЕЛЫЙ СПИСОК (GWL) — API ХЕЛПЕР        == #
+# ============================================================ #
+# Файл: /etc/lumaxadm/global-whitelist.txt
+# Менеджер: modules/security/whitelist_manager.sh
+#
+# После global_whitelist_manager_load доступны:
+#   global_whitelist_get_ips             — массив IP в stdout
+#   global_whitelist_count               — кол-во IP в stdout
+#   global_whitelist_add_ip IP "Коммент" — добавить + синхронизировать
+#   global_whitelist_remove_ip IP        — удалить + синхронизировать
+#   global_whitelist_sync_all            — полная синхронизация
+#   global_whitelist_offer "module"      — предложить пользователю
+global_whitelist_manager_load() {
+    local manager_path="$SCRIPT_DIR/modules/security/whitelist_manager.sh"
+    if [[ -f "$manager_path" ]]; then
+        source "$manager_path"
         return 0
     fi
     return 1

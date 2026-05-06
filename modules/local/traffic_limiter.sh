@@ -730,6 +730,11 @@ ExecStartPre=/bin/bash -c '\
 # === ВОССТАНОВЛЕНИЕ ПРАВИЛ ===
 ExecStart=${python_path} ${TL_CTRL_PY_PATH} --pin-dir ${PIN_MAPS} --rules-file ${TL_CONFIG_DIR}/rules.json restore
 
+# === АВТО-СИНХРОНИЗАЦИЯ ГЛОБАЛЬНОГО БЕЛОГО СПИСКА ===
+# Заполняет BPF-карту whitelist_map из GWL после старта.
+# Если файла нет или карта не пинилась — '-' префикс делает шаг non-fatal.
+ExecStartPost=-${python_path} ${TL_CTRL_PY_PATH} --pin-dir ${PIN_MAPS} whitelist-sync --file /etc/lumaxadm/global-whitelist.txt
+
 # === ОСТАНОВКА ===
 ExecStop=-/bin/bash -c "${rm_path} -rf ${TL_BPF_PIN_DIR}/*"
 ExecStop=${rm_path} -rf ${TL_BPF_PIN_DIR}
