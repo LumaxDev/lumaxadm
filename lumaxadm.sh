@@ -22,7 +22,7 @@ while [ -h "$SOURCE" ]; do
 done
 export SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
 
-readonly VERSION="v5.1.2"
+readonly VERSION="v5.1.3"
 
 # ============================================================ #
 #              ПОДГОТОВКА И ЗАГРУЗКА КОМПОНЕНТОВ               #
