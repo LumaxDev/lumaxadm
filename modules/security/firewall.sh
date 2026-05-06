@@ -584,8 +584,12 @@ _antiddos_setup_limits() {
     python3 - "$before_rules" "$conn_limit" "$rate_limit" "$wl_rules" <<'PYEOF'
 import sys, re
 rules_file = sys.argv[1]
-conn = sys.argv[2]
-rate = sys.argv[3]
+try:
+    conn = int(sys.argv[2])
+    rate = int(sys.argv[3])
+except ValueError:
+    print(f"ERROR: invalid numeric input. conn={sys.argv[2]!r}, rate={sys.argv[3]!r}")
+    sys.exit(1)
 wl = sys.argv[4] if len(sys.argv) > 4 else ""
 
 with open(rules_file, 'r') as f:
@@ -596,7 +600,7 @@ block = f"""
 # CONN limit: max {conn} connections per IP
 -A ufw-before-input -p tcp --syn -m connlimit --connlimit-above {conn} --connlimit-mask 32 -j DROP
 # RATE limit: max {rate} packets/sec per IP
--A ufw-before-input -p tcp -m hashlimit --hashlimit-above {rate}/sec --hashlimit-burst {int(int(rate)*2)} --hashlimit-mode srcip --hashlimit-name lumaxadm_rate -j DROP
+-A ufw-before-input -p tcp -m hashlimit --hashlimit-above {rate}/sec --hashlimit-burst {rate*2} --hashlimit-mode srcip --hashlimit-name lumaxadm_rate -j DROP
 # ICMP flood protection
 -A ufw-before-input -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
 -A ufw-before-input -p icmp --icmp-type echo-request -j DROP

@@ -284,7 +284,7 @@ ask_non_empty() {
             echo "$value"
             return 0
         fi
-        err "Поле не может быть пустым."
+        err "Поле не может быть пустым." >&2
     done
 }
 
@@ -296,22 +296,22 @@ ask_number_in_range() {
     local value
     while true; do
         value=$(safe_read "$prompt" "$def") || return 130
-        
+
         # Check for empty value if no default and non-empty is required implicitly
         if [[ -z "$value" && -z "$def" ]]; then
-            err "Поле не может быть пустым."
+            err "Поле не может быть пустым." >&2
             continue
         fi
 
         if [[ "$value" =~ ^[0-9]+$ ]]; then
             if [[ -n "$min" && "$value" -lt "$min" ]] || [[ -n "$max" && "$value" -gt "$max" ]]; then
-                err "Вводи число от $min до $max."
+                err "Вводи число от $min до $max." >&2
                 continue
             fi
             echo "$value"
             return 0
         fi
-        err "Нужно ввести число."
+        err "Нужно ввести число." >&2
     done
 }
 
@@ -328,22 +328,22 @@ ask_float_in_range() {
         # Заменяем запятую на точку
         value="${value//,/.}"
         if [[ -z "$value" && -n "$def" ]]; then value="$def"; fi
-        if [[ -z "$value" ]]; then err "Поле не может быть пустым."; continue; fi
+        if [[ -z "$value" ]]; then err "Поле не может быть пустым." >&2; continue; fi
         # Проверяем формат: целое или дробное число
         if [[ "$value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
             # Проверяем диапазон через bc
             if (( $(echo "$value < $min" | bc -l) )); then
-                err "Введи число >= ${min}."
+                err "Введи число >= ${min}." >&2
                 continue
             fi
             if (( $(echo "$value > $max" | bc -l) )); then
-                err "Введи число <= ${max}."
+                err "Введи число <= ${max}." >&2
                 continue
             fi
             echo "$value"
             return 0
         fi
-        err "Нужно ввести число (например: 0.5 или 3)."
+        err "Нужно ввести число (например: 0.5 или 3)." >&2
     done
 }
 
@@ -354,7 +354,7 @@ ask_password() {
     # Очистка буфера
     while read -r -t 0; do read -r; done
     read -s -p "$prompt" password || return 130
-    echo # Перевод строки после ввода
+    echo >&2  # Перевод строки после ввода (в stderr, чтобы не попасть в захват)
     echo "$password"
     return 0
 }

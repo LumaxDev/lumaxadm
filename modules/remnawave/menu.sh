@@ -384,6 +384,469 @@ _remna_netbird_menu() {
     disable_graceful_ctrlc
 }
 
+# ============================================================ #
+# ==          АВТО-УСТАНОВКА НОДЫ ПОД КЛЮЧ                   == #
+# ============================================================ #
+# Один пункт меню — десять шагов автоматом + одна опция в конце.
+# Все вопросы задаются в начале, дальше настройка идёт без перерывов.
+
+_remna_auto_node_setup() {
+    clear
+    menu_header "🚀 УСТАНОВКА НОДЫ ПОД КЛЮЧ"
+
+    cat <<'DESCRIPTION'
+
+[i] Этот мастер настроит сервер под ноду Remnawave одним заходом.
+    Я задам несколько вопросов СРАЗУ, потом настройка пойдёт без
+    перерывов до самого конца.
+
+📋 ЧТО БУДЕТ СДЕЛАНО (10 шагов + 1 опционально):
+
+   1. UFW Firewall — установка (если ещё нет)
+   2. Сброс правил UFW + базовая конфигурация
+      (deny incoming / allow outgoing)
+   3. Открытие портов: SSH, IP панели (полный доступ),
+      443/tcp+udp, 8443/tcp+udp → Включение UFW
+   4. Fail2Ban — установка (если нет) + базовый jail.local
+      (bantime=1ч, maxretry=5, findtime=600сек)
+   5. TrafficGuard (антисканер) — установка + активация
+      со стандартным community-листом
+   6. Kernel Hardening — sysctl-усиления ядра от атак
+   7. Сеть «Форсаж» — BBR + CAKE для max пропускной
+   8. Отключение IPv6 (на уровне ядра)
+   9. Отключение ICMP ping
+  10. Установка Remnanode + настройка ротации логов
+  11. (Опционально) Установка Caddy Selfsteal — спросим в конце
+
+DESCRIPTION
+
+    if ! ask_yes_no "Поехали?" "y"; then
+        info "Отмена."
+        return
+    fi
+
+    # ============================================================
+    # PRE-COLLECTION
+    # ============================================================
+    print_separator
+    info "🎙️  ОПРОС: ввожу все параметры заранее"
+    print_separator
+
+    local current_ssh_port
+    current_ssh_port=$(grep "^Port " /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}')
+    current_ssh_port=${current_ssh_port:-22}
+
+    local ssh_port
+    ssh_port=$(safe_read "Текущий SSH порт (или какой использовать)" "$current_ssh_port") || return
+    if ! validate_port "$ssh_port"; then
+        err "Некорректный порт."; return
+    fi
+
+    local panel_ip
+    panel_ip=$(ask_non_empty "IP адрес Панели управления (полный доступ к ноде)") || return
+    if ! validate_ip "$panel_ip"; then
+        err "Некорректный IP."; return
+    fi
+
+    info "Секретный ключ ноды: Панель → Nodes → Add Node → Secret Key"
+    local secret_key
+    secret_key=$(ask_non_empty "Секретный ключ ноды") || return
+
+    local node_port
+    node_port=$(safe_read "Порт ноды" "2420") || return
+    if ! validate_port "$node_port"; then
+        err "Некорректный порт ноды."; return
+    fi
+
+    # ============================================================
+    # CONFIRMATION
+    # ============================================================
+    echo ""
+    print_separator
+    info "📝 СВОДКА:"
+    printf_description "  SSH порт:        ${C_CYAN}${ssh_port}${C_RESET}"
+    printf_description "  IP Панели:       ${C_CYAN}${panel_ip}${C_RESET}"
+    printf_description "  Секретный ключ:  ${C_GRAY}${secret_key:0:24}…${C_RESET}"
+    printf_description "  Порт ноды:       ${C_CYAN}${node_port}${C_RESET}"
+    print_separator
+    echo ""
+
+    if ! ask_yes_no "Запускаю автоматическую настройку?" "y"; then
+        info "Отмена."; return
+    fi
+
+    # Счётчики для итогов
+    local _SETUP_DONE=()
+    local _SETUP_FAIL=()
+    _step_start() { printf "\n${C_BOLD}${C_BLUE}━━━ ▶️  ШАГ %s ━━━${C_RESET}\n" "$1"; }
+    _step_ok()    { _SETUP_DONE+=("$1"); printf "${C_GREEN}━━━ ✅ ШАГ %s OK ━━━${C_RESET}\n" "$1"; sleep 1; }
+    _step_fail()  { _SETUP_FAIL+=("$1"); printf "${C_RED}━━━ ⚠️  ШАГ %s FAIL ━━━${C_RESET}\n" "$1"; sleep 2; }
+
+    # ============================================================
+    # 1. UFW install
+    # ============================================================
+    _step_start "1/10: UFW Firewall — установка"
+    if command -v ufw &>/dev/null; then
+        ok "UFW уже установлен."
+        _step_ok "1/10"
+    else
+        info "Устанавливаю UFW..."
+        export DEBIAN_FRONTEND=noninteractive
+        run_cmd apt-get update -qq >/dev/null 2>&1
+        if run_cmd apt-get install -y -qq ufw >/dev/null 2>&1; then
+            ok "UFW установлен."
+            _step_ok "1/10"
+        else
+            err "Не удалось установить UFW. Прерываю — без него дальше нет смысла."
+            _step_fail "1/10: apt install ufw"
+            return
+        fi
+    fi
+
+    # ============================================================
+    # 2-3. UFW reset + правила + включение
+    # ============================================================
+    _step_start "2/10: Сброс UFW + базовая конфигурация + порты"
+    info "Сбрасываю старые правила..."
+    run_cmd ufw --force reset >/dev/null
+    info "Default политики: deny incoming, allow outgoing..."
+    run_cmd ufw default deny incoming >/dev/null
+    run_cmd ufw default allow outgoing >/dev/null
+    if [[ -f "/etc/default/ufw" ]] && grep -q "^IPV6=yes" "/etc/default/ufw"; then
+        run_cmd sed -i 's/^IPV6=yes/IPV6=no/' "/etc/default/ufw"
+    fi
+    info "Открываю SSH=${ssh_port}, Panel=${panel_ip}, 443/tcp+udp, 8443/tcp+udp..."
+    run_cmd ufw allow "${ssh_port}"/tcp comment 'SSH' >/dev/null
+    run_cmd ufw allow from "$panel_ip" comment 'Panel Full Access' >/dev/null
+    run_cmd ufw allow 443/tcp comment 'VPN/HTTPS' >/dev/null
+    run_cmd ufw allow 443/udp comment 'VPN/HTTP3' >/dev/null
+    run_cmd ufw allow 8443/tcp comment 'VPN ALT' >/dev/null
+    run_cmd ufw allow 8443/udp comment 'VPN ALT UDP' >/dev/null
+    info "Включаю UFW..."
+    if echo "y" | run_cmd ufw enable >/dev/null 2>&1; then
+        ok "UFW активирован."
+        _step_ok "2/10"
+    else
+        _step_fail "2/10: ufw enable"
+    fi
+
+    # ============================================================
+    # 4. Fail2Ban
+    # ============================================================
+    _step_start "3/10: Fail2Ban — установка + базовый jail.local"
+    if ! command -v fail2ban-client &>/dev/null; then
+        info "Устанавливаю Fail2Ban..."
+        export DEBIAN_FRONTEND=noninteractive
+        run_cmd apt-get install -y -qq fail2ban >/dev/null 2>&1 || true
+    else
+        ok "Fail2Ban уже установлен."
+    fi
+    if command -v fail2ban-client &>/dev/null; then
+        local f2b_logpath="/var/log/auth.log"
+        local f2b_backend="auto"
+        if [[ ! -f "$f2b_logpath" ]] && command -v journalctl &>/dev/null; then
+            f2b_logpath="SYSLOG"
+            f2b_backend="systemd"
+        fi
+        info "Создаю /etc/fail2ban/jail.local (bantime=1ч, maxretry=5, findtime=600с)..."
+        run_cmd tee /etc/fail2ban/jail.local > /dev/null <<JAIL
+[DEFAULT]
+bantime = 3600
+findtime = 600s
+maxretry = 5
+backend = $f2b_backend
+ignoreip = 127.0.0.1/8 ::1
+
+[sshd]
+enabled = true
+port = $ssh_port
+filter = sshd
+logpath = $f2b_logpath
+JAIL
+        run_cmd systemctl enable fail2ban >/dev/null 2>&1 || true
+        run_cmd systemctl restart fail2ban
+        sleep 1
+        if systemctl is-active --quiet fail2ban; then
+            ok "Fail2Ban запущен и защищает порт ${ssh_port}."
+            _step_ok "3/10"
+        else
+            _step_fail "3/10: fail2ban service не стартовал"
+        fi
+    else
+        _step_fail "3/10: fail2ban не установился"
+    fi
+
+    # ============================================================
+    # 5. TrafficGuard
+    # ============================================================
+    _step_start "4/10: TrafficGuard (антисканер)"
+    if [[ -f "${SCRIPT_DIR}/modules/security/trafficguard.sh" ]]; then
+        source "${SCRIPT_DIR}/modules/security/trafficguard.sh"
+        if ! _tg_is_installed; then
+            info "Устанавливаю TrafficGuard..."
+            curl -fsSL "$_TG_INSTALL_URL" 2>/dev/null | run_cmd bash >/dev/null 2>&1 || true
+        else
+            ok "TrafficGuard уже установлен."
+        fi
+        if _tg_is_installed; then
+            if _tg_is_running; then
+                ok "TrafficGuard уже работает."
+                _step_ok "4/10"
+            else
+                info "Активирую TrafficGuard со стандартным списком..."
+                if run_cmd traffic-guard full -u "$_TG_LIST_URL" >/dev/null 2>&1; then
+                    ok "TrafficGuard активирован."
+                    _step_ok "4/10"
+                else
+                    _step_fail "4/10: traffic-guard full"
+                fi
+            fi
+        else
+            _step_fail "4/10: install"
+        fi
+    else
+        warn "Модуль trafficguard.sh не найден — пропуск."
+        _step_fail "4/10: модуль не найден"
+    fi
+
+    # ============================================================
+    # 6. Kernel Hardening
+    # ============================================================
+    _step_start "5/10: Kernel Hardening"
+    local SYSCTL_HARDEN="/etc/sysctl.d/99-lumaxadm-hardening.conf"
+    info "Создаю $SYSCTL_HARDEN..."
+    run_cmd tee "$SYSCTL_HARDEN" > /dev/null << 'SYSCTL_HARDEN_EOF'
+# Generated by LumaxADM Auto-Setup (Kernel Hardening)
+# --- SYN Flood Protection ---
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_synack_retries = 2
+net.ipv4.tcp_syn_retries = 2
+net.ipv4.tcp_max_syn_backlog = 4096
+net.core.somaxconn = 4096
+net.core.netdev_max_backlog = 4096
+
+# --- IP Spoofing & Network Attack Protection ---
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.secure_redirects = 0
+net.ipv4.conf.default.secure_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+
+# --- TCP Tuning ---
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 15
+
+# --- Kernel Security ---
+kernel.randomize_va_space = 2
+kernel.dmesg_restrict = 1
+kernel.yama.ptrace_scope = 1
+fs.protected_symlinks = 1
+fs.protected_hardlinks = 1
+SYSCTL_HARDEN_EOF
+    if run_cmd sysctl -p "$SYSCTL_HARDEN" >/dev/null 2>&1; then
+        ok "Kernel Hardening применён."
+        _step_ok "5/10"
+    else
+        _step_fail "5/10: sysctl -p hardening"
+    fi
+
+    # ============================================================
+    # 7. Forsage (BBR + CAKE)
+    # ============================================================
+    _step_start "6/10: Сеть «Форсаж» (BBR + CAKE)"
+    local cake_avail="false"
+    modprobe sch_cake &>/dev/null && cake_avail="true"
+    local pref_cc="bbr"
+    sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -q "bbr2" && pref_cc="bbr2"
+    local pref_qdisc="fq"
+    [[ "$cake_avail" == "true" ]] && pref_qdisc="cake"
+    local SYSCTL_BOOST="/etc/sysctl.d/99-lumaxadm-boost.conf"
+    info "Создаю $SYSCTL_BOOST..."
+    run_cmd tee "$SYSCTL_BOOST" > /dev/null <<EOF_BOOST
+# === КОНФИГ «ФОРСАЖ» ОТ LUMAXADM ===
+net.core.default_qdisc = ${pref_qdisc}
+net.ipv4.tcp_congestion_control = ${pref_cc}
+net.ipv4.tcp_fastopen = 3
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+EOF_BOOST
+    if run_cmd sysctl -p "$SYSCTL_BOOST" >/dev/null 2>&1; then
+        ok "«Форсаж» включён (CC=${pref_cc}, QDisc=${pref_qdisc})."
+        _step_ok "6/10"
+    else
+        _step_fail "6/10: sysctl -p forsage"
+    fi
+
+    # ============================================================
+    # 8. Disable IPv6
+    # ============================================================
+    _step_start "7/10: Отключение IPv6"
+    run_cmd tee /etc/sysctl.d/98-disable-ipv6.conf > /dev/null <<EOF_NO6
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+EOF_NO6
+    if run_cmd sysctl -p /etc/sysctl.d/98-disable-ipv6.conf >/dev/null 2>&1; then
+        ok "IPv6 отключён."
+        _step_ok "7/10"
+    else
+        _step_fail "7/10: sysctl -p ipv6"
+    fi
+
+    # ============================================================
+    # 9. Disable ICMP ping
+    # ============================================================
+    _step_start "8/10: Отключение ICMP ping"
+    local before_rules="/etc/ufw/before.rules"
+    if [[ -f "$before_rules" ]]; then
+        run_cmd cp "$before_rules" "${before_rules}.bak_lumaxadm_$(date +%s)"
+        run_cmd sed -i 's|-A ufw-before-input -p icmp --icmp-type destination-unreachable -j ACCEPT|-A ufw-before-input -p icmp --icmp-type destination-unreachable -j DROP|g' "$before_rules"
+        run_cmd sed -i 's|-A ufw-before-input -p icmp --icmp-type time-exceeded -j ACCEPT|-A ufw-before-input -p icmp --icmp-type time-exceeded -j DROP|g' "$before_rules"
+        run_cmd sed -i 's|-A ufw-before-input -p icmp --icmp-type parameter-problem -j ACCEPT|-A ufw-before-input -p icmp --icmp-type parameter-problem -j DROP|g' "$before_rules"
+        run_cmd sed -i 's|-A ufw-before-input -p icmp --icmp-type echo-request -j ACCEPT|-A ufw-before-input -p icmp --icmp-type echo-request -j DROP|g' "$before_rules"
+        run_cmd ufw reload >/dev/null 2>&1 || true
+        ok "ICMP заблокирован."
+        _step_ok "8/10"
+    else
+        warn "before.rules не найден — пропуск."
+        _step_fail "8/10: before.rules не найден"
+    fi
+
+    # ============================================================
+    # 10. Install Remnanode
+    # ============================================================
+    _step_start "9/10: Установка Remnanode + ротация логов"
+    info "Открываю порт ${node_port}/tcp в UFW..."
+    run_cmd ufw allow "${node_port}"/tcp comment 'Remnanode' >/dev/null
+    run_cmd ufw reload >/dev/null 2>&1 || true
+    info "Скачиваю и запускаю установщик ноды (Dignezzz)..."
+    if curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh -o /tmp/_lumaxadm_rn.sh && \
+       bash /tmp/_lumaxadm_rn.sh @ install --force --secret-key="$secret_key" --port="$node_port"; then
+        rm -f /tmp/_lumaxadm_rn.sh
+        ok "Нода установлена."
+
+        # 10a: setup logs
+        local compose_file="/opt/remnanode/docker-compose.yml"
+        if [[ -f "$compose_file" ]]; then
+            info "Настраиваю ротацию логов ноды..."
+            run_cmd mkdir -p /var/log/remnanode
+            run_cmd cp "$compose_file" "${compose_file}.bak_lumaxadm_$(date +%s)"
+
+            if grep -qE "^[[:space:]]*-.*(/var/log/remnanode:/var/log/remnanode)" "$compose_file"; then
+                ok "Volume логов уже прописан."
+            elif grep -qE "^[[:space:]]*#[[:space:]]*volumes:" "$compose_file" && \
+                 grep -qE "^[[:space:]]*#.*-.*(/var/log/remnanode)" "$compose_file"; then
+                run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(volumes:\)|\    \1|' "$compose_file"
+                run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(-[[:space:]]*/var/log/remnanode:/var/log/remnanode\)|      \1|' "$compose_file"
+            elif grep -qE "^[[:space:]]*volumes:" "$compose_file"; then
+                run_cmd sed -i '/^[[:space:]]*volumes:/a \      - /var/log/remnanode:/var/log/remnanode' "$compose_file"
+            fi
+
+            if ! command -v logrotate &>/dev/null; then
+                run_cmd apt-get install -y -qq logrotate >/dev/null 2>&1 || true
+            fi
+
+            cat > /tmp/_lumaxadm_lr_remnanode <<'LR_EOF'
+/var/log/remnanode/*.log {
+    size 50M
+    rotate 5
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+LR_EOF
+            run_cmd cp /tmp/_lumaxadm_lr_remnanode /etc/logrotate.d/remnanode
+            run_cmd chmod 644 /etc/logrotate.d/remnanode
+            rm -f /tmp/_lumaxadm_lr_remnanode
+
+            info "Перезапускаю ноду..."
+            (cd /opt/remnanode && docker compose down && docker compose up -d) >/dev/null 2>&1
+            ok "Ротация логов настроена."
+        else
+            warn "compose-файл ноды не найден — ротация логов пропущена."
+        fi
+        _step_ok "9/10"
+    else
+        rm -f /tmp/_lumaxadm_rn.sh
+        _step_fail "9/10: установщик ноды"
+    fi
+
+    # ============================================================
+    # 11. Caddy Selfsteal — спрашиваем В КОНЦЕ
+    # ============================================================
+    _step_start "10/10: Caddy Selfsteal (опционально)"
+    echo ""
+    if ask_yes_no "Установить Caddy Selfsteal сейчас?" "y"; then
+        info "Запускаю установщик Caddy Selfsteal (Dignezzz)..."
+        if curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/selfsteal.sh -o /tmp/_lumaxadm_ss.sh && \
+           bash /tmp/_lumaxadm_ss.sh @ install; then
+            rm -f /tmp/_lumaxadm_ss.sh
+            ok "Caddy Selfsteal установлен."
+            _step_ok "10/10"
+        else
+            rm -f /tmp/_lumaxadm_ss.sh
+            _step_fail "10/10: установщик selfsteal"
+        fi
+    else
+        info "Caddy Selfsteal пропущен."
+        _SETUP_DONE+=("10/10 (пропущен по запросу)")
+    fi
+
+    # ============================================================
+    # ИТОГ
+    # ============================================================
+    clear
+    menu_header "🎉 ИТОГ АВТО-УСТАНОВКИ"
+    echo ""
+    info "✅ Успешные шаги (${#_SETUP_DONE[@]}):"
+    for s in "${_SETUP_DONE[@]}"; do
+        printf_description "  ${C_GREEN}✓${C_RESET} ${s}"
+    done
+
+    if [[ ${#_SETUP_FAIL[@]} -gt 0 ]]; then
+        echo ""
+        warn "⚠️  Шаги с ошибками (${#_SETUP_FAIL[@]}):"
+        for s in "${_SETUP_FAIL[@]}"; do
+            printf_description "  ${C_RED}✗${C_RESET} ${s}"
+        done
+    fi
+
+    echo ""
+    print_separator
+    info "📊 Полезные команды для проверки:"
+    printf_description "  Статус UFW:           ${C_CYAN}ufw status verbose${C_RESET}"
+    printf_description "  Статус Fail2Ban:      ${C_CYAN}fail2ban-client status sshd${C_RESET}"
+    printf_description "  Статус TrafficGuard:  ${C_CYAN}traffic-guard status${C_RESET}"
+    printf_description "  Логи ноды:            ${C_CYAN}tail -f /var/log/remnanode/access.log${C_RESET}"
+    printf_description "  Управление нодой:     ${C_CYAN}remnanode${C_RESET}"
+    if command -v selfsteal &>/dev/null; then
+        printf_description "  Caddy Selfsteal:      ${C_CYAN}selfsteal${C_RESET}"
+    fi
+    print_separator
+
+    echo ""
+    if [[ ${#_SETUP_FAIL[@]} -eq 0 ]]; then
+        ok "🚀 Установка завершена успешно. Сервер готов к работе!"
+    else
+        warn "Установка завершена с предупреждениями. Проверь шаги с ошибками."
+    fi
+    echo ""
+    wait_for_enter
+}
+
+
 # --- Меню ---
 
 show_remnawave_centre_menu() {
@@ -422,6 +885,12 @@ show_remnawave_centre_menu() {
         fi
         echo ""
         echo ""
+
+        # --- АВТО-УСТАНОВКА (под ключ) ---
+        if [[ $has_node -eq 0 ]]; then
+            printf_menu_option "0" "🚀 Установка Ноды под ключ ${C_BOLD}${C_GREEN}(всё автоматом)${C_RESET}"
+            echo ""
+        fi
 
         # --- Управление ---
         if [[ $has_panel -eq 1 ]]; then
@@ -476,6 +945,14 @@ show_remnawave_centre_menu() {
         choice=$(safe_read "Чё делаем?" "") || break
 
         case "$choice" in
+            0)
+                if [[ $has_node -eq 1 ]]; then
+                    warn "Нода уже установлена — авто-установка в этом сервере не нужна."
+                    sleep 2
+                    continue
+                fi
+                _remna_auto_node_setup
+                ;;
             1)
                 if [[ $has_panel -eq 0 ]]; then
                     warn "Панель не установлена на этом сервере. Тут нечем управлять, братан."
