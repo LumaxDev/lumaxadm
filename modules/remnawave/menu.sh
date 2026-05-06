@@ -583,8 +583,15 @@ JAIL
     if [[ -f "${SCRIPT_DIR}/modules/security/trafficguard.sh" ]]; then
         source "${SCRIPT_DIR}/modules/security/trafficguard.sh"
         if ! _tg_is_installed; then
-            info "Устанавливаю TrafficGuard..."
-            curl -fsSL "$_TG_INSTALL_URL" 2>/dev/null | run_cmd bash >/dev/null 2>&1 || true
+            info "Устанавливаю TrafficGuard (скачивание + установка занимает до минуты)..."
+            # Не редиректим в /dev/null — показываем прогресс юзеру.
+            # </dev/null закрывает stdin (если установщик решит что-то спросить — не зависнет).
+            # timeout 180 — на случай реального зависания.
+            if timeout 180 bash -c "curl -fsSL '$_TG_INSTALL_URL' | bash" </dev/null; then
+                ok "TrafficGuard установлен."
+            else
+                warn "Установка TrafficGuard вышла за timeout или провалилась."
+            fi
         else
             ok "TrafficGuard уже установлен."
         fi
@@ -593,12 +600,18 @@ JAIL
                 ok "TrafficGuard уже работает."
                 _step_ok "4/10"
             else
-                info "Активирую TrafficGuard со стандартным списком..."
-                if run_cmd traffic-guard full -u "$_TG_LIST_URL" >/dev/null 2>&1; then
+                info "Активирую TrafficGuard со стандартным списком (скачивает ~100K подсетей)..."
+                # Показываем вывод бинаря, закрываем stdin, ставим timeout 5 минут.
+                if timeout 300 traffic-guard full -u "$_TG_LIST_URL" </dev/null; then
                     ok "TrafficGuard активирован."
                     _step_ok "4/10"
                 else
-                    _step_fail "4/10: traffic-guard full"
+                    local rc=$?
+                    if [[ $rc -eq 124 ]]; then
+                        _step_fail "4/10: traffic-guard завис (timeout 5 мин)"
+                    else
+                        _step_fail "4/10: traffic-guard full exit=$rc"
+                    fi
                 fi
             fi
         else
@@ -724,40 +737,63 @@ EOF_NO6
     fi
 
     # ============================================================
-    # 10. Install Remnanode
+    # 10. Install Remnanode + ротация логов
     # ============================================================
     _step_start "9/10: Установка Remnanode + ротация логов"
     info "Открываю порт ${node_port}/tcp в UFW..."
     run_cmd ufw allow "${node_port}"/tcp comment 'Remnanode' >/dev/null
     run_cmd ufw reload >/dev/null 2>&1 || true
-    info "Скачиваю и запускаю установщик ноды (Dignezzz)..."
-    if curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh -o /tmp/_lumaxadm_rn.sh && \
-       bash /tmp/_lumaxadm_rn.sh @ install --force --secret-key="$secret_key" --port="$node_port"; then
-        rm -f /tmp/_lumaxadm_rn.sh
-        ok "Нода установлена."
 
-        # 10a: setup logs
-        local compose_file="/opt/remnanode/docker-compose.yml"
-        if [[ -f "$compose_file" ]]; then
-            info "Настраиваю ротацию логов ноды..."
-            run_cmd mkdir -p /var/log/remnanode
-            run_cmd cp "$compose_file" "${compose_file}.bak_lumaxadm_$(date +%s)"
+    info "Скачиваю установщик ноды (Dignezzz)..."
+    curl -Ls https://github.com/DigneZzZ/remnawave-scripts/raw/main/remnanode.sh -o /tmp/_lumaxadm_rn.sh
 
-            if grep -qE "^[[:space:]]*-.*(/var/log/remnanode:/var/log/remnanode)" "$compose_file"; then
-                ok "Volume логов уже прописан."
-            elif grep -qE "^[[:space:]]*#[[:space:]]*volumes:" "$compose_file" && \
-                 grep -qE "^[[:space:]]*#.*-.*(/var/log/remnanode)" "$compose_file"; then
-                run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(volumes:\)|\    \1|' "$compose_file"
-                run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(-[[:space:]]*/var/log/remnanode:/var/log/remnanode\)|      \1|' "$compose_file"
-            elif grep -qE "^[[:space:]]*volumes:" "$compose_file"; then
-                run_cmd sed -i '/^[[:space:]]*volumes:/a \      - /var/log/remnanode:/var/log/remnanode' "$compose_file"
-            fi
+    info "Запускаю установщик. После 'docker compose up' он стримит логи контейнера —"
+    info "у тебя 2 минуты. Если за это время нода поднимется, мы продолжим автоматом."
+    # timeout 120: установщик от Dignezzz после docker compose up может стримить логи бесконечно.
+    # Контейнер запускается через 'docker compose up -d' (detached), поэтому убийство
+    # foreground-bash не остановит ноду. </dev/null закрывает stdin от любых интерактивных prompts.
+    timeout 120 bash /tmp/_lumaxadm_rn.sh @ install --force --secret-key="$secret_key" --port="$node_port" </dev/null
+    local install_rc=$?
+    rm -f /tmp/_lumaxadm_rn.sh
 
-            if ! command -v logrotate &>/dev/null; then
-                run_cmd apt-get install -y -qq logrotate >/dev/null 2>&1 || true
-            fi
+    # Успех определяем НЕ по exit code (там может быть 124 = timeout, 130 = SIGINT),
+    # а по реальному состоянию: запущен ли контейнер remnanode.
+    sleep 3
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^remnanode"; then
+        ok "Контейнер remnanode запущен (install_rc=${install_rc})."
+        local node_running=1
+    else
+        warn "Контейнер remnanode не обнаружен (install_rc=${install_rc})."
+        local node_running=0
+    fi
 
-            cat > /tmp/_lumaxadm_lr_remnanode <<'LR_EOF'
+    # Ротация логов — выполняется НЕЗАВИСИМО от install_rc, если есть compose-файл.
+    # Так setup логов не пропускается даже если установщик «завис на логах».
+    local compose_file="/opt/remnanode/docker-compose.yml"
+    if [[ -f "$compose_file" ]]; then
+        info "Настраиваю ротацию логов ноды..."
+        run_cmd mkdir -p /var/log/remnanode
+        run_cmd cp "$compose_file" "${compose_file}.bak_lumaxadm_$(date +%s)"
+
+        if grep -qE "^[[:space:]]*-.*(/var/log/remnanode:/var/log/remnanode)" "$compose_file"; then
+            ok "Volume логов уже прописан."
+        elif grep -qE "^[[:space:]]*#[[:space:]]*volumes:" "$compose_file" && \
+             grep -qE "^[[:space:]]*#.*-.*(/var/log/remnanode)" "$compose_file"; then
+            run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(volumes:\)|\    \1|' "$compose_file"
+            run_cmd sed -i 's|^[[:space:]]*#[[:space:]]*\(-[[:space:]]*/var/log/remnanode:/var/log/remnanode\)|      \1|' "$compose_file"
+            ok "Volume логов раскомментирован."
+        elif grep -qE "^[[:space:]]*volumes:" "$compose_file"; then
+            run_cmd sed -i '/^[[:space:]]*volumes:/a \      - /var/log/remnanode:/var/log/remnanode' "$compose_file"
+            ok "Volume логов добавлен."
+        else
+            warn "Не нашёл секцию volumes в compose — пропуск автоматического добавления."
+        fi
+
+        if ! command -v logrotate &>/dev/null; then
+            run_cmd apt-get install -y -qq logrotate >/dev/null 2>&1 || true
+        fi
+
+        cat > /tmp/_lumaxadm_lr_remnanode <<'LR_EOF'
 /var/log/remnanode/*.log {
     size 50M
     rotate 5
@@ -767,20 +803,30 @@ EOF_NO6
     copytruncate
 }
 LR_EOF
-            run_cmd cp /tmp/_lumaxadm_lr_remnanode /etc/logrotate.d/remnanode
-            run_cmd chmod 644 /etc/logrotate.d/remnanode
-            rm -f /tmp/_lumaxadm_lr_remnanode
+        run_cmd cp /tmp/_lumaxadm_lr_remnanode /etc/logrotate.d/remnanode
+        run_cmd chmod 644 /etc/logrotate.d/remnanode
+        rm -f /tmp/_lumaxadm_lr_remnanode
+        ok "Logrotate config создан."
 
-            info "Перезапускаю ноду..."
-            (cd /opt/remnanode && docker compose down && docker compose up -d) >/dev/null 2>&1
-            ok "Ротация логов настроена."
+        info "Перезапускаю ноду чтобы compose подхватил новый volume..."
+        (cd /opt/remnanode && docker compose down && docker compose up -d) >/dev/null 2>&1
+        ok "Ротация логов настроена."
+
+        if [[ $node_running -eq 1 ]]; then
+            _step_ok "9/10"
         else
-            warn "compose-файл ноды не найден — ротация логов пропущена."
+            # Контейнер не был, но compose-файл есть → возможно пытаемся прямо сейчас поднять
+            sleep 3
+            if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^remnanode"; then
+                ok "Контейнер поднят после правки compose."
+                _step_ok "9/10"
+            else
+                _step_fail "9/10: контейнер remnanode не стартовал"
+            fi
         fi
-        _step_ok "9/10"
     else
-        rm -f /tmp/_lumaxadm_rn.sh
-        _step_fail "9/10: установщик ноды"
+        warn "compose-файл /opt/remnanode/docker-compose.yml не найден."
+        _step_fail "9/10: compose-файл отсутствует (установка ноды провалилась)"
     fi
 
     # ============================================================
