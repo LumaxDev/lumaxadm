@@ -89,7 +89,22 @@ show_firewall_menu() {
                 wait_for_enter
                 ;;
             e|E)
-                if ! command -v ufw &> /dev/null; then err "UFW не установлен."; else info "Включаю UFW..."; echo "y" | run_cmd ufw enable; fi
+                if ! command -v ufw &> /dev/null; then
+                    err "UFW не установлен."
+                else
+                    # Авто-детект Docker перед включением (Professional Fix)
+                    if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
+                        echo ""
+                        echo -e "  ${C_YELLOW}⚠️  ВНИМАНИЕ: Обнаружен Docker!${C_RESET}"
+                        echo -e "  UFW и Docker несовместимы без дополнительной настройки."
+                        echo -e "  После включения UFW Docker-контейнеры могут потерять доступ к сети."
+                        echo ""
+                        if ask_yes_no "Применить исправление UFW+Docker автоматически?" "y"; then
+                            _firewall_fix_docker_ufw
+                        fi
+                    fi
+                    info "Включаю UFW..."; echo "y" | run_cmd ufw enable
+                fi
                 ;;
             d|D)
                 if ! command -v ufw &> /dev/null; then err "UFW не установлен."; elif ask_yes_no "Вы уверены, что хотите отключить firewall?"; then
@@ -712,9 +727,124 @@ _firewall_install_ufw() {
         run_cmd ufw default allow outgoing
 
         if ask_yes_no "Включить Firewall сейчас?"; then
+            # Авто-детект Docker: на серверах с Docker UFW без доп. настройки
+            # не управляет трафиком контейнеров. Предлагаем Professional Fix.
+            if command -v docker &>/dev/null && docker ps &>/dev/null 2>&1; then
+                echo ""
+                echo -e "  ${C_YELLOW}⚠️  ВНИМАНИЕ: Обнаружен Docker!${C_RESET}"
+                echo -e "  UFW и Docker несовместимы без дополнительной настройки."
+                if ask_yes_no "Применить профессиональное исправление UFW+Docker автоматически?" "y"; then
+                    _firewall_fix_docker_ufw
+                fi
+            fi
             echo "y" | run_cmd ufw enable
         fi
     else
         err "Не удалось установить UFW. Проверьте интернет-соединение или репозитории."
+    fi
+}
+
+# ============================================================ #
+#            DOCKER + UFW PROFESSIONAL FIX                     #
+# ============================================================ #
+# Docker по умолчанию пишет правила напрямую в iptables, в обход UFW,
+# поэтому опубликованные порты контейнеров остаются открытыми, даже
+# если UFW настроен на DENY. Этот фикс направляет трафик контейнеров
+# через цепочку DOCKER-USER → ufw-user-forward, возвращая контроль UFW.
+# Вызывается из меню, при установке и движком миграций (0001_docker_ufw_pro).
+_firewall_fix_docker_ufw() {
+    print_separator
+    info "Применяю исправление UFW + Docker..."
+    print_separator
+
+    # 1. Разрешаем трафик из Docker-подсетей
+    run_cmd ufw allow from 172.16.0.0/12 comment 'Docker networks' 2>/dev/null || true
+    run_cmd ufw allow from 192.168.0.0/16 comment 'Docker bridge' 2>/dev/null || true
+    ok "Разрешены Docker-подсети (172.16.0.0/12, 192.168.0.0/16)"
+
+    # 2. Добавляем правила в /etc/ufw/after.rules для DOCKER-USER chain
+    # Эти правила выживают после ufw reset и не затрагиваются обычными правилами UFW
+    local after_rules="/etc/ufw/after.rules"
+    local marker_start="# --- НАЧАЛО: LumaxADM Docker UFW Fix ---"
+    local marker_end="# --- КОНЕЦ: LumaxADM Docker UFW Fix ---"
+
+    # Определяем имя основного интерфейса
+    local iface
+    iface=$(ip -o -4 route show to default 2>/dev/null | awk '{print $5}' | head -1)
+    iface=${iface:-eth0}
+
+    if [[ -f "$after_rules" ]] && grep -q "$marker_start" "$after_rules"; then
+        info "Блок Docker UFW Fix уже существует в after.rules. Обновляю..."
+        run_cmd python3 - <<PYEOF
+import re
+with open('${after_rules}', 'r') as f:
+    content = f.read()
+content = re.sub(r'\n${marker_start}.*?${marker_end}\n', '', content, flags=re.DOTALL)
+with open('${after_rules}', 'w') as f:
+    f.write(content)
+PYEOF
+    fi
+
+    # Вставляем блок перед последним COMMIT в after.rules
+    run_cmd python3 - "$after_rules" "$marker_start" "$marker_end" "$iface" <<'PYEOF'
+import sys
+rules_file, marker_s, marker_e, iface = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(rules_file, 'r') as f:
+    content = f.read()
+
+docker_block = f"""
+{marker_s}
+# Эти правила заставляют Docker-трафик проходить через фильтрацию UFW.
+# Теперь команды типа 'ufw route allow/deny' будут корректно работать для контейнеров.
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -i {iface} -p udp -m udp --sport 53 --dport 1024:65535 -j RETURN
+-A DOCKER-USER -i {iface} -j ufw-user-forward
+-A DOCKER-USER -i {iface} -j DROP
+-A DOCKER-USER -j RETURN
+{marker_e}
+"""
+
+# Вставляем перед последней строкой COMMIT
+if 'COMMIT' in content:
+    idx = content.rfind('COMMIT')
+    content = content[:idx] + docker_block + content[idx:]
+else:
+    content += docker_block
+
+with open(rules_file, 'w') as f:
+    f.write(content)
+print('OK')
+PYEOF
+
+    if [[ $? -eq 0 ]]; then
+        ok "Блок Docker UFW Fix добавлен в ${after_rules} (интерфейс: ${iface})"
+
+        # 3. Автоматически переносим только те порты, которые реально нужны Docker
+        info "Синхронизирую только порты Docker-контейнеров с Firewall (route)..."
+
+        # Получаем список портов, которые реально проброшены в Docker
+        local docker_ports
+        docker_ports=$(docker ps --format "{{.Ports}}" 2>/dev/null | grep -oE '0.0.0.0:[0-9]+' | cut -d: -f2 | sort -u)
+
+        # Также берем список портов, разрешенных в UFW IN
+        local ufw_in_ports
+        ufw_in_ports=$(ufw status | grep "ALLOW" | grep -v "(v6)" | awk '{print $1}' | grep -oE '^[0-9]+' | sort -u)
+
+        # Пересекаем их: разрешаем в route только то, что и открыто в UFW, и есть в Docker
+        for p in $ufw_in_ports; do
+            if echo "$docker_ports" | grep -qx "$p"; then
+                run_cmd ufw route allow "$p" >/dev/null 2>&1 || true
+            else
+                # Если порта нет в Docker, но он был в route (очистка от лишнего)
+                run_cmd ufw route delete allow "$p" >/dev/null 2>&1 || true
+            fi
+        done
+
+        run_cmd ufw reload 2>/dev/null || true
+        ok "UFW перезагружен. Все текущие порты теперь открыты и для Docker-контейнеров."
+    else
+        err "Не удалось добавить блок в after.rules. Добавьте вручную."
+        warn "Руководство: https://docs.docker.com/network/iptables/"
     fi
 }
